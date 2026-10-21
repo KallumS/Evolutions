@@ -1343,10 +1343,10 @@ function send_take(kind) local(i, n, tr) (
 // ================================================================ frame setup
 !font_ready ? pick_font();
 (ui_zoom < 1 || ui_zoom > 2) ? ( ui_zoom = 1 );
-// The layout needs MINW points across; a narrower window shrinks a large
+// The layout needs LAYOUT_W points across; a narrower window shrinks a large
 // interface to fit (never below 100%) rather than drawing past its edge.
-MINW = 400;
-ui_s = max(1, gfx_ext_retina) * max(1, min(ui_zoom, gfx_w / (max(1, gfx_ext_retina) * MINW)));
+LAYOUT_W = 400;
+ui_s = max(1, gfx_ext_retina) * max(1, min(ui_zoom, gfx_w / (max(1, gfx_ext_retina) * LAYOUT_W)));
 fonts();
 
 ui_key = gfx_getchar();
@@ -1381,7 +1381,8 @@ helper_on = hb_seen > 0 && now_t - hb_seen < 1.5;
   set_status("The helper didn’t answer. In REAPER’s Actions list, run “Midi Evolver Helper”, then try again.");
 );
 
-setx(C_INK);
+// the ground behind everything (docs/COLOUR.md)
+setx(C_GROUND);
 gfx_rect(0, 0, gfx_w, gfx_h, 1);
 
 fl_n = 0; reg_on = 1; hint_on = 0;
@@ -1465,7 +1466,7 @@ loop(roll_n,
 );
 hi < lo ? ( lo = 48; hi = 84; );
 (hi - lo < 24) ? ( mid = (hi + lo) / 2; lo = floor(mid - 12); hi = ceil(mid + 12); );
-nh = max(2 * ui_s, (vh - 8 * ui_s) / (hi - lo + 1));
+nh = clampv((vh - 8 * ui_s) / (hi - lo + 1), 3 * ui_s, 10 * ui_s);
 i = 0;
 loop(roll_n,
   r = roll_base + i * 5;
@@ -1602,35 +1603,41 @@ text_fit("They come in from the top down as the energy rises.", pad + tw + 24 * 
 y += th + 8 * ui_s;
 
 // A row: the box and the name, then Channel, Octave and Level; the fields go
-// under the name when the window is too narrow for one line.
+// under the name when the window is too narrow for one line, and the words
+// wrap rather than being cut short.
 fwl = 84 * ui_s;
-need = ch + gap + 150 * ui_s + 3 * (fwl + gap) + 12 * ui_s;
-one_line = gfx_w - 2 * pad >= need;
-rowh = one_line ? fh + 12 * ui_s : 28 * ui_s + 8 * ui_s + fh + 12 * ui_s;
+gfx_setfont(2);
+lh3 = gfx_texth + 2 * ui_s;
 L = 0;
 loop(NL,
+  !L_on[L] ? strcpy(#ls, "Off") :
+  (L_act[L] && holding) ? sprintf(#ls, "%s — playing", layer_role(L)) :
+  // (at once: the shape starts at or above where it comes in)
+  L_th[L] <= shape_at(0, 0) + 0.0001 ? sprintf(#ls, "%s — comes in at once", layer_role(L)) :
+                 sprintf(#ls, "%s — comes in at %d%%", layer_role(L), floor(L_th[L] * 100 + 0.5));
   ry = y; rx = pad; rw = gfx_w - 2 * pad;
+  nx = rx + 6 * ui_s + ch + 8 * ui_s;
+  one_line = rw - (nx - rx) - 3 * (fwl + gap) - 12 * ui_s >= 150 * ui_s;
+  nwid = one_line ? rw - (nx - rx) - 3 * (fwl + gap) - 12 * ui_s : rw - (nx - rx) - 16 * ui_s;
+  gfx_setfont(2);
+  nlines = wrap_text(#ls, 0, 0, nwid, lh3, 0);
+  texth_ = 4 * ui_s + 18 * ui_s + nlines * lh3;
+  rowh = one_line ? max(fh + 12 * ui_s, texth_ + 6 * ui_s) : texth_ + 8 * ui_s + fh + 12 * ui_s;
   setx(L_act[L] && holding ? C_ACTIVE : C_POPUP);
   gfx_rect(rx, ry, rw, rowh, 1);
   (L_act[L] && holding) ? ( setx(C_ACCENT); gfx_rect(rx, ry, 3 * ui_s, rowh, 1); );
-  bxh = rx + 6 * ui_s; byh = one_line ? ry + (rowh - ch) / 2 : ry + 4 * ui_s;
+  bxh = rx + 6 * ui_s; byh = ry + 4 * ui_s;
   tickbox(200 + L, bxh, byh, L_on[L]) ? (
     set_slider(9 + L, L_on[L] ? 0 : 1);
   );
   hint("On or off: a layer that’s off never plays. The layers that are on come in from the top down.");
-  // name, role and state
-  nx = bxh + ch + 8 * ui_s;
-  nwid = one_line ? rw - (nx - rx) - 3 * (fwl + gap) - 12 * ui_s : rw - (nx - rx) - 8 * ui_s;
+  // name, then what it does and whether it plays
   gfx_setfont(3);
   setx(L_on[L] ? C_TEXT : C_LABEL2);
-  text_fit(layer_name(L), nx, byh - 2 * ui_s, nwid, 16 * ui_s);
+  text_fit(layer_name(L), nx, byh + 2 * ui_s, nwid, 16 * ui_s);
   gfx_setfont(2);
   setx(L_act[L] && holding ? C_TEXT : C_LABEL2);
-  !L_on[L] ? strcpy(#ls, "Off") :
-  (L_act[L] && holding) ? sprintf(#ls, "%s — playing", layer_role(L)) :
-  L_th[L] <= 0 ? sprintf(#ls, "%s — comes in at once", layer_role(L)) :
-                 sprintf(#ls, "%s — comes in at %d%%", layer_role(L), floor(L_th[L] * 100 + 0.5));
-  text_fit(#ls, nx, byh + 15 * ui_s, nwid, 16 * ui_s);
+  wrap_text(#ls, nx, byh + 20 * ui_s, nwid, lh3, 1);
   // the meter: how loud its last note was
   mx_ = rx + rw - 8 * ui_s; mh_ = rowh - 16 * ui_s;
   setx(C_ROLL); gfx_rect(mx_, ry + 8 * ui_s, 4 * ui_s, mh_, 1);
@@ -1638,7 +1645,7 @@ loop(NL,
   lv > 0.02 ? ( setx(C_ACCENT); gfx_rect(mx_, ry + 8 * ui_s + mh_ * (1 - lv), 4 * ui_s, mh_ * lv, 1); );
   // the fields
   fx0 = one_line ? rx + rw - 12 * ui_s - 3 * (fwl + gap) + gap : nx;
-  fyy = one_line ? ry + 6 * ui_s : ry + 28 * ui_s + 8 * ui_s + 4 * ui_s;
+  fyy = one_line ? ry + 6 * ui_s : ry + texth_ + 8 * ui_s;
   field(210 + L, fx0, fyy, fwl, fh, "Channel", L_ch[L] + 1, 1, 16, 6, L_on[L], 1, 1) ? set_slider(14 + L, fld_val);
   hint("Channel: the MIDI channel this layer plays on, so each can go to its own instrument.");
   field(220 + L, fx0 + fwl + gap, fyy, fwl, fh, "Octave", L_oct[L], -2, 2, 7, L_on[L], 1, 1) ? set_slider(19 + L, fld_val);
