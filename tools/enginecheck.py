@@ -331,6 +331,29 @@ def main_checks(host, jsfx):
           "the pad voices every chord tone, wide at the bottom (C3 G3 E4)", "pad %s" % pad)
     r.close()
 
+    # on one channel, a quick arpeggio note on a pitch the pad holds strikes
+    # it again but never ends it: every pad voice still sounds at the end
+    r = run(sliders={9: 0, 11: 0, 13: 0, 3: 0, 4: 70, 5: 70, 8: 0, 6: 1, 7: 31})
+    r.hold([60, 64, 67])
+    r.bars(8)
+    v = r.var("pad_n")
+    voices = [int(x) for x in r.mem(1000, int(v["pad_n"]))]
+    _, still = hygiene(r.ev)
+    arp_hits = [e for e in r.ons(0) if e[2] in voices and r.beat_of(e[0]) > 1]
+    lost = [p_ for p_ in voices if (0, p_) not in still]
+    check(arp_hits and not lost, "on one channel, a short note on a pitch the pad holds never cuts the pad's note",
+          "pad %s, lost %s, %d strikes on its pitches" % (voices, lost, len(arp_hits)))
+    r.close()
+
+    # too few voices for the chord: the fifth goes first
+    r = run(sliders=spread({4: 0, 5: 0, 9: 0, 11: 0, 12: 0, 13: 0}))
+    r.hold([50, 57, 60, 65])
+    r.beats(1)
+    pad = [e[2] for e in r.ons(1)]
+    check(sorted(p_ % 12 for p_ in pad) == [0, 2, 5] and len(pad) == 3,
+          "three pad voices for Dm7 leave out the fifth (D C F, a shell)", "pad %s" % pad)
+    r.close()
+
     # ------------------------------------------------------------------ registers and layer settings
     print("\n-- the layers' settings --")
     r = run(sliders=spread({19: -1, 23: 1, 25: 0}))
@@ -456,6 +479,30 @@ def main_checks(host, jsfx):
         if not any(abs(beat / g - round(beat / g)) * g < 0.012 for g in grids):
             off.append(round(beat, 3))
     check(not off, "while REAPER plays, the pulse and arpeggio fall on REAPER's beats, not on when the key went down",
+          "off the grid at %s" % off[:5])
+    r.close()
+
+    # a hold with REAPER stopped counts its grid from the key; a hold after
+    # Play counts it from REAPER's beat 0 again
+    r = run(sliders=spread({4: 60, 5: 60, 8: 0}))
+    r.beats(0.29)
+    r.hold([60, 64, 67])
+    r.bars(1)
+    r.release([60, 64, 67])
+    r.beats(1)
+    r.ev = []
+    r.send("transport 1 0")
+    t_play = int(r.var("vt")["vt"] * SR * 60.0 / r.tempo)       # (vt counts beats from the host's start)
+    r.beats(1.37)
+    r.hold([60, 64, 67])
+    r.bars(2)
+    spb = SR * 60.0 / r.tempo
+    off = []
+    for s_, b1, b2, b3 in r.ons(3) + r.ons(2):
+        beat = (s_ - t_play) / spb
+        if not any(abs(beat / g - round(beat / g)) * g < 0.012 for g in grids):
+            off.append(round(beat, 3))
+    check(r.ons(3) and not off, "after a hold with REAPER stopped, a hold while it plays is on REAPER's beats again",
           "off the grid at %s" % off[:5])
     r.close()
 

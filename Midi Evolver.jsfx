@@ -474,6 +474,9 @@ function pad_voicing() local(bot, n, i, j, k, p, want, lo) (
   // up), then doublings
   memset(pad_base + 32, 0, 12);
   pad_base[32 + fmodp(bot - ch_root, 12)] = 1;
+  // too few voices for every tone: leave out the fifth first, the part-
+  // writing books' rule (Dm7 in three voices is D3 C4 F4, not D3 A3 C4)
+  (want < ch_m && cpc_base[7] && ch_m > 2) ? pad_base[32 + 7] = 1;
   lo = bot + 7;
   i = 0;
   while (n < want && i < 48) (
@@ -1305,9 +1308,10 @@ function set_slider(n, v) (
 
 function note_name(p, buf) local(pc) (
   pc = p % 12;
-  strcpy(buf, pc == 0 ? "C" : pc == 1 ? "C♯" : pc == 2 ? "D" : pc == 3 ? "E♭" : pc == 4 ? "E" :
-              pc == 5 ? "F" : pc == 6 ? "F♯" : pc == 7 ? "G" : pc == 8 ? "A♭" : pc == 9 ? "A" :
-              pc == 10 ? "B♭" : "B");
+  // spelt as ScaleView spells (C#, Eb): Arial, REAPER's fallback, may have no ♯ or ♭
+  strcpy(buf, pc == 0 ? "C" : pc == 1 ? "C#" : pc == 2 ? "D" : pc == 3 ? "Eb" : pc == 4 ? "E" :
+              pc == 5 ? "F" : pc == 6 ? "F#" : pc == 7 ? "G" : pc == 8 ? "Ab" : pc == 9 ? "A" :
+              pc == 10 ? "Bb" : "B");
 );
 
 // The take, handed to the helper script through gmem: the events, then the
