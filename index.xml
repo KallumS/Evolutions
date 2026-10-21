@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  ReaPack index for Midi Evolver.
+
+  Add this repository in REAPER with Extensions > ReaPack > Import repositories,
+  pasting the raw URL of this file on the default branch:
+
+    https://raw.githubusercontent.com/KallumS/Midi-Evolver/main/index.xml
+
+  That URL only resolves once this file is on the default branch.
+
+  Each <source> is pinned to a commit rather than a branch, so an installed
+  version is the exact set of files that was tested and cannot change
+  underneath anyone. Publishing a new version means adding a <version> block
+  with a fresh commit hash - never editing an existing one.
+
+  Two packages: the JSFX, and the helper script with the two files it loads
+  from beside itself. Install both: Drag Out and Insert need the helper.
+
+  ReaPack keys an installed package by its NAME, so renaming a file is not an
+  upgrade. Rename sparingly.
+-->
+<index version="1" name="Midi Evolver">
+  <category name="MIDI">
+
+    <reapack name="Midi Evolver.jsfx" type="effect" desc="Midi Evolver">
+      <version name="1.0" author="kallums" time="2026-10-21T23:10:00Z">
+        <changelog><![CDATA[First release. Hold a chord and it grows into music that moves - a bass, a held pad whose voices drift, repeated notes, a looping arpeggio and high sparkling notes, coming in one after another and evolving for as long as you hold the keys. Build, Swell, Fade or Wander over a pace of bars; Change sets how much the patterns themselves change; a new variation every hold, or locked to one. Each layer has its own channel, octave and level. Everything it plays is kept as a take: Drag Out saves it and shows it in the Media Explorer to drag onto a track, Insert puts it on the track (both need Midi Evolver Helper running). Not yet run in REAPER - checked in ysfx.]]></changelog>
+        <source main="main">https://raw.githubusercontent.com/KallumS/Midi-Evolver/ce686b40ef4a6d2863f93e19c39acbbaa8c82210/Midi%20Evolver.jsfx</source>
+      </version>
+    </reapack>
+
+    <reapack name="Midi Evolver Helper.lua" type="script" desc="Midi Evolver Helper">
+      <version name="1.0" author="kallums" time="2026-10-21T23:10:00Z">
+        <changelog><![CDATA[First release. Runs in the background for the Midi Evolver JSFX: Drag Out saves the take as a MIDI file and shows it in the Media Explorer, Insert puts it on the plug-in's track as one undo step. Run it once; it stays running until REAPER closes, or until you run it again.]]></changelog>
+        <source main="main" file="Midi Evolver Helper.lua">https://raw.githubusercontent.com/KallumS/Midi-Evolver/ce686b40ef4a6d2863f93e19c39acbbaa8c82210/reascripts/Midi%20Evolver%20Helper.lua</source>
+        <source file="me_midi.lua">https://raw.githubusercontent.com/KallumS/Midi-Evolver/ce686b40ef4a6d2863f93e19c39acbbaa8c82210/reascripts/me_midi.lua</source>
+        <source file="me_place.lua">https://raw.githubusercontent.com/KallumS/Midi-Evolver/ce686b40ef4a6d2863f93e19c39acbbaa8c82210/reascripts/me_place.lua</source>
+      </version>
+    </reapack>
+
+  </category>
+</index>
