@@ -1,0 +1,1831 @@
+desc:Midi Evolver - held chords grow into evolving motion
+author:kallums
+version:1.0
+tags:MIDI generator evolving texture arpeggio ostinato recorder
+about:
+  # Midi Evolver
+  Hold some keys and the chord you hold grows into music that moves: a
+  bass, a held pad whose inner voices drift, repeated notes, a looping
+  arpeggio and high sparkling notes come in one after another and evolve
+  for as long as you hold the keys - slowly or quickly, as you choose, and
+  differently every time. Everything it plays is recorded; drag the take
+  into REAPER from the Media Explorer, or insert it on the track (both
+  need the Midi Evolver Helper script running).
+
+in_pin:none
+out_pin:none
+options:no_meter gmem=MidiEvolver
+
+slider1:0<0,3,1{Build,Swell,Fade,Wander}>-Shape
+slider2:8<1,64,1>-Pace (bars)
+slider3:50<0,100,1>-Change (%)
+slider4:20<0,100,1>-Start (%)
+slider5:100<0,100,1>-Peak (%)
+slider6:0<0,1,1{New Each Time,Locked}>-Variation
+slider7:1<1,99999,1>-Variation Number
+slider8:30<0,100,1>-Feel (%)
+slider9:1<0,1,1{Off,On}>-Bass
+slider10:1<0,1,1{Off,On}>-Pad
+slider11:1<0,1,1{Off,On}>-Pulse
+slider12:1<0,1,1{Off,On}>-Arpeggio
+slider13:1<0,1,1{Off,On}>-Sparkle
+slider14:1<1,16,1>-Bass Channel
+slider15:1<1,16,1>-Pad Channel
+slider16:1<1,16,1>-Pulse Channel
+slider17:1<1,16,1>-Arpeggio Channel
+slider18:1<1,16,1>-Sparkle Channel
+slider19:0<-2,2,1>-Bass Octave
+slider20:0<-2,2,1>-Pad Octave
+slider21:0<-2,2,1>-Pulse Octave
+slider22:0<-2,2,1>-Arpeggio Octave
+slider23:0<-2,2,1>-Sparkle Octave
+slider24:85<0,100,1>-Bass Level (%)
+slider25:70<0,100,1>-Pad Level (%)
+slider26:75<0,100,1>-Pulse Level (%)
+slider27:80<0,100,1>-Arpeggio Level (%)
+slider28:60<0,100,1>-Sparkle Level (%)
+slider29:0<0,16,1{Omni,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16}>-MIDI In
+slider30:0<0,1,1{Muted,Played}>-Held Keys
+slider31:1<0,1,1{Ignored,Holds}>-Sustain Pedal
+slider32:0<0,3,1{Off,CC1,CC11,CC1 and CC11}>-Dynamics CC
+slider33:0<0,1,1{Where Played,At Edit Cursor}>-Place Take
+
+@init
+
+// ================================================================ memory map
+// Keep the table in CLAUDE.md current: overlapping regions corrupt silently.
+held_base = 0;       // 128: a key counts as held (pressed, or kept by the pedal)
+down_base = 128;     // 128: a key is physically down
+hvel_base = 256;     // 128: the velocity it was struck with
+ch_base   = 384;     // 128: the held pitches, lowest first (ch_n of them)
+ps_base   = 512;     // 16: the chord's pitch classes above its lowest note
+cpc_base  = 528;     // 12: which pitch classes the chord has
+col_base  = 544;     // 16: colour tones, as offsets above the lowest note
+NL = 5;              // layers: 0 Bass, 1 Pad, 2 Pulse, 3 Arpeggio, 4 Sparkle
+L_on   = 600;  L_ch   = 608;  L_oct  = 616;  L_lvl  = 624;
+L_next = 632;  L_steps = 640; L_act  = 648;  L_len  = 656;
+L_th   = 664;  L_meter = 672; L_cyc  = 680;  L_a    = 688;
+L_b    = 696;  L_rot  = 704;  L_kofs = 712;  L_eprev = 720;
+rs_base  = 760;      // 8: one random stream per layer, and one more
+pat_base = 800;      // 5 x 32: each layer's pattern
+pad_base = 1000;     // 8 voices as pitches, 8 as they were (+16), 12 tones covered (+32)
+pend_base = 1100;    // PN_MAX x 6: notes due later than this block
+PN_MAX   = 64;
+an_base  = 1600;     // AN_MAX x AN_W: notes sounding now (used, ch, pitch, off, layer, roll, start)
+AN_MAX   = 256;
+AN_W     = 8;
+snd_base = 3700;     // 16 x 128: 1 + which an slot holds a channel's pitch
+oq_base  = 5800;     // OQ_MAX x 4 (+4 to sort with): this block's output, sorted before it is sent
+OQ_MAX   = 1024;
+ev_base  = 10000;    // EV_MAX x 4: this block's input
+EV_MAX   = 512;
+focus_base = 12100;  // FOCUS_MAX x FOCUS_W: the keyboard's stops (window only)
+FOCUS_MAX = 64;
+FOCUS_W  = 6;
+roll_base = 12600;   // ROLL_MAX x 5: notes for the live view (pitch, start, end, layer, vel)
+ROLL_MAX = 512;
+rec_base = 65536;    // REC_MAX x 4: the take (beat, status, data1, data2)
+REC_MAX  = 100000;
+
+// gmem (options:gmem=MidiEvolver), shared with reascripts/Midi Evolver Helper.lua.
+// The protocol is described in CLAUDE.md; change both sides together.
+G_MAGIC = 0; G_HEART = 1; G_REQ = 2; G_KIND = 3; G_TRACK = 4; G_QN0 = 5;
+G_COUNT = 6; G_TEMPO = 7; G_NUM = 8; G_DEN = 9; G_PLACE = 10; G_DONE = 11;
+G_RESULT = 12; G_LEN = 13; G_INST = 14; G_DONEINST = 15; G_FLAGS = 16;
+G_MSGLEN = 199; G_MSG = 200; G_EVENTS = 1000;
+ME_MAGIC = 7301;     // "this is protocol 1"
+
+gfx_ext_retina < 1 ? ( gfx_ext_retina = 1 );
+
+// ---------------------------------------------------------------- palette
+// The house scheme (docs/COLOUR.md). Every grey satisfies R < G < B - the
+// load-bearing property, because a neutral grey at the same lightness reads
+// flat next to the accent. The accent and the two warning colours are the
+// only entries off that ramp.
+C_ACCENT = 0xFFF200;   // whatever is on: a chosen button, a held note sounding
+C_CTRL   = 0xA9AFBA;   // unchosen buttons, notes that have finished
+C_CTRL_H = 0xC0C6CF;   // button hover
+C_CTRL_D = 0x8F96A2;   // button held
+C_INK    = 0x14171C;   // text on ANY button, and button borders
+C_WARN   = 0xD2483F;   // marks a warning; never for words
+C_ROLL   = 0x111419;   // the live view's ground
+C_SUNK   = 0x1A1D23;   // sunken frames, panels
+C_POPUP  = 0x1B1F25;   // layer rows
+C_BEAT   = 0x1E2228;   // beat lines
+C_HOVER  = 0x22262D;   // row hover
+C_GROUND = 0x23272E;   // window chrome
+C_ACTIVE = 0x2A2F37;   // a playing layer's row, a control that is off
+C_SEP    = 0x3A404A;   // separators, panel borders, bar lines
+C_EDGE   = 0x6D7581;   // the edge of a field or setting, marks: 3:1 or more
+C_DIM    = 0x8A919C;   // disabled text only, and marks - too faint for words
+C_LABEL2 = 0xB0B6C0;   // secondary text: 7.35:1 on the ground
+C_TEXT   = 0xDDE1E7;   // body text
+C_PLAY   = 0xF2F4F7;   // the hold's place on the energy curve
+C_RING   = 0xF2F4F7;   // the keyboard focus ring - near-white, never the accent
+C_WARN_TEXT = 0xFF9E96; // a warning in words: 7.55:1 (the red itself is 3.4:1)
+
+function setx(c) (
+  gfx_r = ((c / 65536) | 0) / 255;
+  gfx_g = ((((c / 256) | 0) % 256)) / 255;
+  gfx_b = (c % 256) / 255;
+  gfx_a = 1;
+);
+function setxa(c, a) ( setx(c); gfx_a = a; );
+
+// Hover and held are derived, not stored: f > 0 toward white, f < 0 toward black.
+function shade(c, f) local(r, g, b) (
+  r = (c / 65536) | 0;
+  g = ((c / 256) | 0) % 256;
+  b = c % 256;
+  f > 0 ? (
+    r = r + (255 - r) * f; g = g + (255 - g) * f; b = b + (255 - b) * f;
+  ) : (
+    r = r * (1 + f); g = g * (1 + f); b = b * (1 + f);
+  );
+  ((r | 0) * 65536) + ((g | 0) * 256) + (b | 0);
+);
+HOVER_F =  0.18;
+HELD_F  = -0.18;
+function clampv(v, a, b) ( max(a, min(b, v)) );
+function fmodp(a, b) ( a - floor(a / b) * b );   // a mod b, never negative
+
+// ================================================================ the dice
+// Park and Miller's generator (Midi Variator's), one stream per layer, so a
+// variation number always gives the same choices and one layer's draws
+// never move another's. Done in doubles with floor() rather than %, which
+// may be 32-bit on some systems: 48271 * 2^31 is still exact in a double.
+function rnd(k) local(s) (
+  s = rs_base[k] * 48271;
+  s -= floor(s / 2147483647) * 2147483647;
+  rs_base[k] = s;
+  (s - 1) / 2147483646;
+);
+function rint(k, n) ( min(n - 1, floor(rnd(k) * n)) );
+function coin(k, p) ( rnd(k) < p );
+function seed_streams(sd) local(i) (
+  i = 0;
+  loop(8,
+    rs_base[i] = fmodp(sd * 7919 + i * 104729 + 12345, 2147483646) + 1;
+    loop(3, rnd(i));
+    i += 1;
+  );
+);
+// A value between 0 and 1 that is the same for the same variation and k:
+// the Wander shape's turning points.
+function hash01(k, sd) local(x) (
+  x = sin(k * 12.9898 + sd * 0.07813 + 1.234) * 43758.5453;
+  x - floor(x);
+);
+function smooth01(u) ( u = clampv(u, 0, 1); u * u * (3 - 2 * u) );
+// Smooth noise through hash01's points; point 0 is 0, so Wander starts low.
+function noise(u, sd) local(k, f, a, b) (
+  k = floor(u); f = u - k;
+  a = k == 0 ? 0 : hash01(k, sd); b = hash01(k + 1, sd);
+  a + (b - a) * (0.5 - 0.5 * cos($pi * f));
+);
+
+// ================================================================ settings
+// Derived values live here rather than in @slider, because the window writes
+// sliders directly and sliderchange() does not re-run @slider.
+function apply_sliders() local(i, n, k) (
+  shape   = slider1;
+  pace    = max(1, slider2);
+  change  = slider3 * 0.01;
+  e_start = slider4 * 0.01;
+  e_peak  = max(e_start, slider5 * 0.01);
+  locked  = slider6;
+  feel    = slider8 * 0.01;
+  L_on[0] = slider9 >= 0.5;  L_on[1] = slider10 >= 0.5; L_on[2] = slider11 >= 0.5;
+  L_on[3] = slider12 >= 0.5; L_on[4] = slider13 >= 0.5;
+  L_ch[0] = slider14 - 1; L_ch[1] = slider15 - 1; L_ch[2] = slider16 - 1;
+  L_ch[3] = slider17 - 1; L_ch[4] = slider18 - 1;
+  L_oct[0] = slider19; L_oct[1] = slider20; L_oct[2] = slider21;
+  L_oct[3] = slider22; L_oct[4] = slider23;
+  L_lvl[0] = slider24 * 0.01; L_lvl[1] = slider25 * 0.01; L_lvl[2] = slider26 * 0.01;
+  L_lvl[3] = slider27 * 0.01; L_lvl[4] = slider28 * 0.01;
+  in_chan   = slider29;
+  keys_thru = slider30;
+  pedal_on  = slider31;
+  dyn_cc    = slider32;
+  place_mode = slider33;
+  // Layers come in one after another as the energy rises - Belkin's
+  // crescendo by adding instruments in order, with the last kept back for
+  // the climax (decision 0003). The first layer that is on always plays.
+  n = 0; i = 0;
+  loop(NL, L_on[i] ? n += 1; i += 1; );
+  k = 0; i = 0;
+  loop(NL,
+    L_on[i] ? ( L_th[i] = n > 1 ? 0.85 * k / n : 0; k += 1; ) : ( L_th[i] = 2 );
+    i += 1;
+  );
+  // A faster pace changes the patterns more often as well as sooner.
+  rate_f = clampv(sqrt(8 / pace), 0.5, 2);
+);
+
+// ================================================================ the clock
+// bt is REAPER's beat while it plays and our own count while it is stopped;
+// vt never jumps (the live view and the take are timed by it). Steps fall on
+// a grid counted from `origin`: beat 0 while REAPER plays (its bar lines),
+// the first key while it is stopped.
+function bar_beats() ( ts_num > 0 && ts_denom > 0 ? ts_num * 4 / ts_denom : 4 );
+function next_grid(t, g) ( origin + ceil((t - origin) / g - 0.0001) * g );
+function to_off(t) ( clampv(floor((t - bt) / bps + 0.5), 0, samplesblock - 1) );
+
+// ================================================================ the chord
+// The held keys are the harmony (decision 0002). Every layer reads them as
+// a ladder of chord tones from the lowest key up; a pattern stores rungs,
+// not pitches, so it follows a new chord at once.
+function chord_rebuild() local(i, n, root, m, c, d, ok) (
+  n = 0; i = 0;
+  loop(128, held_base[i] ? ( ch_base[n] = i; n += 1; ); i += 1; );
+  ch_n = n;
+  memset(cpc_base, 0, 12);
+  m = 0;
+  n > 0 ? (
+    root = ch_base[0];
+    i = 0;
+    loop(n, cpc_base[(ch_base[i] - root) % 12] = 1; i += 1; );
+    i = 0;
+    loop(12, cpc_base[i] ? ( ps_base[m] = i; m += 1; ); i += 1; );
+    // One key alone is heard as a root: give it its fifth, a drone's
+    // open sound, rather than a ladder of octaves.
+    m == 1 ? ( ps_base[1] = 7; cpc_base[7] = 1; m = 2; );
+    ch_root = root;
+  );
+  ch_m = m;
+  // Colour tones: a whole tone above a chord tone (the 9th, 11th or 13th),
+  // never a semitone from anything held - Midi Variator's clash guard in
+  // pitch classes (decision 0005). C E G gives D and A, never F or B.
+  col_n = 0;
+  i = 0;
+  loop(12,
+    cpc_base[i] ? (
+      c = (i + 2) % 12;
+      ok = !cpc_base[c] && !cpc_base[(c + 1) % 12] && !cpc_base[(c + 11) % 12];
+      d = 0; loop(col_n, col_base[d] == c ? ok = 0; d += 1; );
+      ok ? ( col_base[col_n] = c; col_n += 1; );
+    );
+    i += 1;
+  );
+);
+
+// The i-th rung of the chord ladder above `base` (a pitch whose class is the root's).
+function tone(i, base) local(m) (
+  m = max(1, ch_m);
+  base + ps_base[fmodp(i, m)] + 12 * floor(i / m);
+);
+// The root moved into [lo, hi].
+function root_in(lo, hi) local(p) (
+  p = ch_root;
+  while (p < lo) ( p += 12; );
+  while (p > hi) ( p -= 12; );
+  p;
+);
+// The nearest colour tone to pitch p, within a whole tone, or -1.
+function colour_near(p) local(i, q, best, bd, d) (
+  best = -1; bd = 3; i = 0;
+  loop(col_n,
+    q = p - fmodp(p - ch_root, 12) + col_base[i];
+    d = abs(q - p); d > 6 ? ( q += q < p ? 12 : -12; d = abs(q - p); );
+    (d > 0 && d < bd) ? ( bd = d; best = q; );
+    i += 1;
+  );
+  best;
+);
+
+// ================================================================ notes out
+// Everything a block sends goes into oq first and is sorted by time, with a
+// note-off before a note-on at the same moment, so a repeated note is never
+// cut short by the release of the one before it.
+function q_add(t, s, d1, d2) local(p) (
+  oq_n < OQ_MAX ? (
+    p = oq_base + oq_n * 4;
+    p[0] = to_off(t); p[1] = s; p[2] = d1; p[3] = d2;
+    oq_n += 1;
+  );
+);
+
+function roll_add(p, t, L, v) local(r) (
+  r = roll_base + roll_w * 5;
+  r[0] = p; r[1] = vt + (t - bt); r[2] = -1; r[3] = L; r[4] = v;
+  roll_w = (roll_w + 1) % ROLL_MAX;
+  roll_n = min(ROLL_MAX, roll_n + 1);
+  (roll_w + ROLL_MAX - 1) % ROLL_MAX;
+);
+
+function an_end(i, t) local(a, ch, p, r) (
+  a = an_base + i * AN_W;
+  a[0] ? (
+    // A note pushed a little late by Feel may start after the moment that
+    // ends it: the end is never before the start (plus two samples, so the
+    // sort cannot put the note-off first).
+    t = max(t, a[6] + 2 * bps);
+    ch = a[1]; p = a[2];
+    q_add(t, 0x80 | ch, p, 0);
+    snd_base[ch * 128 + p] = 0;
+    r = roll_base + a[5] * 5;
+    (r[0] == p && r[2] < 0) ? r[2] = vt + (t - bt);
+    a[0] = 0;
+    an_cnt -= 1;
+  );
+);
+
+// A note from layer L at beat t, len beats long (len < 0: until released).
+// MIDI has one of each pitch on a channel: if the pitch is already sounding
+// and will sound longer (the pad's held voice, say, under a short arpeggio
+// note), it is struck again and keeps its longer end - so a quick note
+// never cuts a held one short (decision 0003).
+function note_on(t, L, p, v, len) local(ch, k, i, a, found, off, r) (
+  ch = L_ch[L];
+  p = clampv(floor(p + 0.5), 0, 127);
+  v = clampv(floor(v * L_lvl[L] + 0.5), 1, 127);
+  off = len < 0 ? 1000000000000 : t + max(0.02, len);
+  k = L_lvl[L] > 0 ? snd_base[ch * 128 + p] : -1;
+  (k > 0 && an_base[(k - 1) * AN_W + 6] >= t - 2 * bps) ? (
+    0;   // struck this very moment already (two layers on one note): once is enough
+  ) : (k > 0 && an_base[(k - 1) * AN_W + 3] > off) ? (
+    a = an_base + (k - 1) * AN_W;
+    q_add(t, 0x80 | ch, p, 0);
+    q_add(t, 0x90 | ch, p, v);
+    r = roll_base + a[5] * 5;
+    (r[0] == p && r[2] < 0) ? r[2] = vt + (t - bt);
+    a[5] = roll_add(p, t, a[4], v);
+    L_meter[L] = max(L_meter[L], v / 127);
+  ) : k >= 0 ? (
+    k > 0 ? an_end(k - 1, t);
+    found = -1; i = 0;
+    while (found < 0 && i < AN_MAX) ( an_base[i * AN_W] == 0 ? found = i; i += 1; );
+    found >= 0 ? (
+      a = an_base + found * AN_W;
+      a[0] = 1; a[1] = ch; a[2] = p; a[3] = off; a[4] = L; a[6] = t;
+      a[5] = roll_add(p, t, L, v);
+      found + 1 > an_hi ? an_hi = found + 1;
+      an_cnt += 1;
+      snd_base[ch * 128 + p] = found + 1;
+      q_add(t, 0x90 | ch, p, v);
+      L_meter[L] = max(L_meter[L], v / 127);
+    );
+  );
+);
+
+function note_off_pitch(t, L, p) local(k) (
+  k = snd_base[L_ch[L] * 128 + p];
+  (k > 0 && an_base[(k - 1) * AN_W + 4] == L) ? an_end(k - 1, t);
+);
+
+function layer_off(L, t) local(i) (
+  i = 0;
+  loop(an_hi, (an_base[i * AN_W] && an_base[i * AN_W + 4] == L) ? an_end(i, t); i += 1; );
+);
+
+function all_off(t) local(i) (
+  i = 0;
+  loop(an_hi, an_base[i * AN_W] ? an_end(i, t); i += 1; );
+  pn_n = 0;
+);
+
+// Notes due after this block (an echo, a rolled chord's later voices).
+function schedule(t, L, p, v, len) local(q) (
+  pn_n < PN_MAX ? (
+    q = pend_base + pn_n * 6;
+    q[0] = t; q[1] = L; q[2] = p; q[3] = v; q[4] = len;
+    pn_n += 1;
+  );
+);
+function pend_fire(i) local(q, last) (
+  q = pend_base + i * 6;
+  L_act[q[1]] ? note_on(q[0], q[1], q[2], q[3], q[4]);
+  // move the last one into its place
+  pn_n -= 1;
+  i < pn_n ? ( last = pend_base + pn_n * 6; memcpy(q, last, 6); );
+);
+
+// A step's note: now, or held over to the next block if its feel makes it
+// land past this one.
+function play(t, L, p, v, len) (
+  t >= bt_end ? schedule(t, L, p, v, len) : note_on(t, L, p, v, len);
+);
+
+// A little life: notes come a few milliseconds late (never early - a
+// scheduler cannot play before now) and a few steps louder or softer.
+function late() ( rnd(5) * 0.02 * feel );
+function jit() ( (rnd(5) + rnd(5) - 1) * 6 * feel );
+
+// ================================================================ energy
+// How much is going on, 0 to 1, after u paces of holding (decision 0004).
+function shape_at(u, sd) local(x) (
+  shape == 0 ? ( x = smooth01(u) ) :                     // Build: rise, then stay
+  shape == 1 ? ( x = 0.5 - 0.5 * cos($pi * u) ) :        // Swell: rise and fall, again
+  shape == 2 ? ( x = 1 - smooth01(u) ) :                 // Fade: from the top down
+               ( x = noise(max(0, u) * 2, sd) );        // Wander: anywhere, slowly
+  e_start + (e_peak - e_start) * x;
+);
+function energy_at(u) (
+  // Breathing: a slow, small drift on top, more of it with more Change.
+  clampv(shape_at(u, seed_now) + (noise(u * 6 + 50, seed_now) - 0.5) * 0.08 * change, 0, 1);
+);
+
+// ================================================================ the layers
+function grid_of(L) local(bb) (
+  bb = bar_beats();
+  L == 0 ? ( e_now < 0.35 ? bb : e_now < 0.7 ? ( bb / 2 == floor(bb / 2) ? bb / 2 : 1 ) : 1 ) :
+  L == 1 ? ( pace >= 8 ? 2 * bb : bb ) :
+  // the pulse stays in eighths until the very top: the background keeps
+  // its rests (Belkin), so the arpeggio can be heard through it
+  L == 2 ? ( e_now < 0.45 ? 1 : e_now < 0.9 ? 0.5 : 0.25 ) :
+  // The arpeggio adds subdivisions as it grows - eighths, triplets,
+  // sixteenths - Glass's additive process in Einstein on the Beach.
+  L == 3 ? ( e_now < 0.4 ? 0.5 : e_now < 0.7 ? 1 / 3 : 0.25 ) :
+           0.25;
+);
+
+// ---- Bass: the lowest held note, low down, held through.
+function step_bass(t) local(p, g, s, v, bb) (
+  g = grid_of(0); bb = bar_beats();
+  p = root_in(31, 42) + 12 * L_oct[0];
+  s = fmodp(floor((t - origin) / g + 0.5), max(1, floor(bb / g + 0.5)));
+  // On a weak strike now and then, the fifth; near the top, the octave above
+  // on the bar's last strike.
+  (s > 0 && coin(0, 0.3 * change * e_now)) ? ( p += p + 7 > 47 + 12 * L_oct[0] ? -5 : 7; );
+  (e_now > 0.8 && s == floor(bb / g + 0.5) - 1 && coin(0, 0.5 * change)) ? p += 12;
+  v = 58 + 50 * e_now + (s == 0 ? 8 : 0) + jit();
+  layer_off(0, t);
+  play(t + late(), 0, p, v, g * 0.95);
+);
+
+// ---- Pad: the chord held, voiced wide at the bottom and close at the top
+// (the overtone series, Belkin and Orchestration Analysis), its inner voices
+// moving one at a time.
+// Every chord tone has a voice.
+function pad_covered() local(i, ok) (
+  ok = 1; i = 0;
+  loop(12, (cpc_base[i] && !pad_base[32 + i]) ? ok = 0; i += 1; );
+  ok;
+);
+function pad_voicing() local(bot, n, i, j, k, p, want, lo) (
+  bot = root_in(43, 54) + 12 * L_oct[1];
+  want = clampv(3 + floor(e_now * 2.5), 3, 6);
+  memcpy(pad_base + 16, pad_base, 8);   // the voices as they were
+  pad_old = pad_n;
+  pad_base[0] = bot;
+  n = 1;
+  // the next voice a fifth or more above the bottom, then closer above
+  // that; every chord tone first (C3 G3 E4 for C E G - the third a tenth
+  // up), then doublings
+  memset(pad_base + 32, 0, 12);
+  pad_base[32 + fmodp(bot - ch_root, 12)] = 1;
+  // too few voices for every tone: leave out the fifth first, the part-
+  // writing books' rule (Dm7 in three voices is D3 C4 F4, not D3 A3 C4)
+  (want < ch_m && cpc_base[7] && ch_m > 2) ? pad_base[32 + 7] = 1;
+  lo = bot + 7;
+  i = 0;
+  while (n < want && i < 48) (
+    p = lo + i;
+    (cpc_base[fmodp(p - ch_root, 12)] && (!pad_base[32 + fmodp(p - ch_root, 12)] || pad_covered())) ? (
+      pad_base[n] = p; n += 1; pad_base[32 + fmodp(p - ch_root, 12)] = 1;
+      lo = p + (n < 3 ? 3 : 1) - i - 1;
+    );
+    i += 1;
+  );
+  pad_n = n;
+);
+
+function pad_sound(t) local(i, j, keep, p, sp) (
+  // release what is no longer in the voicing, strike what is new
+  i = 0;
+  loop(pad_old,
+    p = pad_base[16 + i]; keep = 0; j = 0;
+    loop(pad_n, pad_base[j] == p ? keep = 1; j += 1; );
+    !keep ? note_off_pitch(t, 1, p);
+    i += 1;
+  );
+  sp = 0;
+  i = 0;
+  loop(pad_n,
+    p = pad_base[i]; keep = 0; j = 0;
+    loop(pad_old, pad_base[16 + j] == p ? keep = 1; j += 1; );
+    !keep ? (
+      // a struck chord is rolled a little, bottom to top
+      sp == 0 ? note_on(t, 1, p, 50 + 40 * e_now + jit(), -1)
+              : schedule(t + sp * 0.012 * feel + 0.0001, 1, p, 50 + 40 * e_now + jit(), -1);
+      sp += 1;
+    );
+    i += 1;
+  );
+  pad_old = pad_n;
+  memcpy(pad_base + 16, pad_base, 8);
+);
+
+function pad_move(t) local(i, j, p, q, d, tries, ok, top, want) (
+  memcpy(pad_base + 16, pad_base, 8); pad_old = pad_n;
+  want = clampv(3 + floor(e_now * 2.5), 3, 6);
+  // grow or thin with the energy, from the top
+  pad_n < want ? (
+    p = pad_base[pad_n - 1] + 1; q = -1; d = 0;
+    while (q < 0 && d < 12) ( cpc_base[fmodp(p + d - ch_root, 12)] ? q = p + d; d += 1; );
+    q > 0 ? ( pad_base[pad_n] = q; pad_n += 1; );
+  ) : pad_n > want ? ( pad_n -= 1; ) :
+  coin(1, 0.35 + 0.6 * change) ? (
+    // one inner or top voice steps to the next chord tone up or down, or,
+    // with more Change and energy, to a colour tone a whole tone away
+    tries = 0; ok = 0;
+    while (!ok && tries < 8) (
+      i = 1 + rint(1, max(1, pad_n - 1));
+      p = pad_base[i];
+      (col_n > 0 && coin(1, 0.5 * change * e_now)) ? (
+        q = colour_near(p);
+      ) : (
+        d = coin(1, 0.5) ? 1 : -1; q = p + d;
+        while (!cpc_base[fmodp(q - ch_root, 12)] && abs(q - p) < 12) ( q += d; );
+      );
+      ok = q > pad_base[0] + 4 && q < pad_base[0] + 30;
+      j = 0; loop(pad_n, pad_base[j] == q ? ok = 0; j += 1; );
+      ok ? pad_base[i] = q;
+      tries += 1;
+    );
+  );
+  pad_sound(t);
+);
+
+function step_pad(t) (
+  L_steps[1] == 0 ? ( pad_n = 0; pad_old = 0; pad_voicing(); pad_old = 0; pad_sound(t); )
+                  : pad_move(t);
+);
+
+// ---- Pulse: repeated notes on a Euclidean rhythm that fills in as the
+// energy rises, its accents turning a step at a time (Reich's phasing).
+function step_pulse(t) local(g, n, s, k, on, p, v, base, w) (
+  g = grid_of(2);
+  n = max(1, floor(bar_beats() / g + 0.5));
+  s = fmodp(floor((t - origin) / g + 0.5), n);
+  (s == 0 && L_steps[2] > 0 && coin(2, 0.5 * change * rate_f)) ? (
+    w = rnd(2);
+    w < 0.6 ? ( L_rot[2] += coin(2, 0.5) ? 1 : -1; ) :
+    w < 0.8 ? ( L_kofs[2] = clampv(L_kofs[2] + (coin(2, 0.5) ? 1 : -1), -2, 2); ) :
+              ( L_b[2] = L_a[2] - 1 - rint(2, 2); );
+  );
+  k = clampv(floor(n * (0.3 + 0.45 * e_now) + 0.5) + L_kofs[2], 1, n);
+  on = fmodp((s + L_rot[2]) * k, n) < k;
+  on ? (
+    base = root_in(55, 66) + 12 * L_oct[2];
+    p = tone((s % 2) == 0 ? L_a[2] : L_b[2], base);
+    v = 52 + 48 * e_now + (s == 0 ? 10 : (s % 2) ? -8 : 0) + jit();
+    play(t + late(), 2, p, v, g * (e_now > 0.6 ? 0.45 : 0.8));
+  );
+);
+
+// ---- Arpeggio: a looping figure of 5 to 7 notes against a bar of 4, so it
+// phases against the bar (Reich's loops of different lengths). At the end of
+// each time round it may turn, grow a note or lose one (Glass's additive
+// process), or move a note to its neighbour.
+function arp_mutate() local(L, n, w, j, m, de) (
+  L = 3; n = L_len[3]; m = max(1, ch_m);
+  de = e_now - L_eprev[3]; L_eprev[3] = e_now;
+  coin(3, change * rate_f) ? (
+    w = rnd(3) * 10 + (de > 0.01 ? -1.5 : de < -0.01 ? 1.5 : 0);
+    w < 2.5 ? (
+      // turn: start from the second note (phase shift)
+      j = pat_base[L * 32]; memcpy(pat_base + L * 32, pat_base + L * 32 + 1, n - 1);
+      pat_base[L * 32 + n - 1] = j;
+    ) : w < 4.5 ? (
+      n < 12 ? ( pat_base[L * 32 + n] = max(0, pat_base[L * 32 + n - 1] + (coin(3, 0.5) ? 1 : -1)); L_len[3] = n + 1; );
+    ) : w < 6 ? (
+      n > 3 ? L_len[3] = n - 1;
+    ) : w < 8.5 ? (
+      j = rint(3, n); pat_base[L * 32 + j] = max(0, pat_base[L * 32 + j] + (coin(3, 0.5) ? 1 : -1));
+    ) : (
+      j = rint(3, n);
+      pat_base[L * 32 + j] >= m ? ( pat_base[L * 32 + j] -= m; ) : ( pat_base[L * 32 + j] += m; );
+    );
+  );
+);
+
+function step_arp(t) local(g, i, span, idx, p, v, base, m, c) (
+  g = grid_of(3);
+  i = L_steps[3] % max(1, L_len[3]);
+  (i == 0 && L_steps[3] > 0) ? ( arp_mutate(); L_cyc[3] += 1; );
+  i = L_steps[3] % max(1, L_len[3]);
+  m = max(1, ch_m);
+  // the figure opens up in register as the energy rises: one octave, then two, then three
+  span = clampv(1 + floor(e_now * 2.6), 1, 3);
+  idx = fmodp(pat_base[3 * 32 + i], span * m);
+  base = root_in(55, 66) + 12 * L_oct[3];
+  p = tone(idx, base);
+  // an unaccented step may become a colour tone - a neighbour that the next
+  // step leaves (Open Music Theory's unaccented neighbour)
+  (i % 2 == 1 && col_n > 0 && coin(3, 0.15 * change * e_now)) ? ( c = colour_near(p); c > 0 ? p = c; );
+  v = 50 + 52 * e_now + (i == 0 ? 10 : (i % 2) ? -6 : 0) + jit();
+  play(t + late(), 3, p, v, g * (e_now > 0.7 ? 0.6 : 0.9));
+);
+
+// ---- Sparkle: high, soft, sparse notes, some of them echoed.
+function step_sparkle(t) local(p, v, base, len, n, idx) (
+  coin(4, clampv((e_now - L_th[4]) / max(0.05, 1 - L_th[4]), 0, 1) * (0.12 + 0.18 * change)) ? (
+    base = root_in(67, 78) + 12 * L_oct[4];
+    n = max(1, ch_m) * 2;
+    idx = rint(4, n);
+    p = tone(idx, base);
+    (col_n > 0 && coin(4, 0.3 * change)) ? ( p = colour_near(p) > 0 ? colour_near(p) : p; );
+    p == L_a[4] ? p = tone(idx + 1, base);
+    L_a[4] = p;
+    v = 38 + 40 * e_now + jit();
+    len = 0.25 + rint(4, 3) * 0.25;
+    play(t + late(), 4, p, v, len);
+    // an echo three sixteenths later, softer (Orchestration Analysis'
+    // doubling by displacement in time)
+    coin(4, 0.4) ? schedule(t + 0.75, 4, p, v * 0.7, len);
+  );
+);
+
+function step(L, t) (
+  L == 0 ? step_bass(t) : L == 1 ? step_pad(t) : L == 2 ? step_pulse(t) :
+  L == 3 ? step_arp(t) : step_sparkle(t);
+  L_steps[L] += 1;
+);
+
+// ---- a new variation for a new hold
+function arp_pattern() local(n, c, i, h) (
+  n = 5 + rint(3, 3);
+  c = rint(3, 4);
+  h = ceil(n / 2);
+  i = 0;
+  loop(n,
+    pat_base[3 * 32 + i] =
+      c == 0 ? i :                                   // up
+      c == 1 ? ( i < h ? i : n - i ) :               // up and down
+      c == 2 ? n - 1 - i :                           // down
+               ( i % 2 == 0 ? i / 2 : (i - 1) / 2 + 2 );  // leaping: 0 2 1 3 2 4 3
+    i += 1;
+  );
+  L_len[3] = n;
+);
+
+function new_variation(sd) local(i) (
+  seed_now = sd;
+  seed_streams(sd);
+  i = 0;
+  loop(NL,
+    L_steps[i] = 0; L_act[i] = 0; L_cyc[i] = 0; L_rot[i] = 0; L_kofs[i] = 0; L_eprev[i] = 0; L_a[i] = 0;
+    i += 1;
+  );
+  arp_pattern();
+  L_rot[2] = rint(2, 4);
+  L_a[2] = max(1, ch_m) + rint(2, 2);       // the pulse's two notes, near the top of an octave
+  L_b[2] = L_a[2] - 1 - rint(2, 2);
+  L_a[4] = -1;
+  pad_n = 0; pad_old = 0;
+);
+
+// Brings layers in and out with the energy. A layer that leaves lets its
+// short notes ring out; the pad's held voices are released.
+function layers_update(t) local(i) (
+  i = 0;
+  loop(NL,
+    (L_on[i] && !L_act[i] && e_now >= L_th[i]) ? (
+      L_act[i] = 1; L_steps[i] = 0;
+      L_next[i] = (i <= 1 && hold_fresh) ? t : next_grid(t, grid_of(i));
+    ) : (L_act[i] && (!L_on[i] || e_now < L_th[i] - 0.04)) ? (
+      L_act[i] = 0;
+      i == 1 ? ( layer_off(1, t); pad_n = 0; );
+    );
+    i += 1;
+  );
+  hold_fresh = 0;
+);
+
+// ================================================================ dynamics CC
+function send_dyn(t) local(v, i, j, dup, ch) (
+  dyn_cc > 0 ? (
+    v = clampv(floor(30 + 90 * e_now + 0.5), 0, 127);
+    v != dyn_last ? (
+      dyn_last = v;
+      i = 0;
+      loop(NL,
+        L_on[i] ? (
+          ch = L_ch[i]; dup = 0; j = 0;
+          loop(i, (L_on[j] && L_ch[j] == ch) ? dup = 1; j += 1; );
+          !dup ? (
+            (dyn_cc == 1 || dyn_cc == 3) ? q_add(t, 0xB0 | ch, 1, v);
+            (dyn_cc == 2 || dyn_cc == 3) ? q_add(t, 0xB0 | ch, 11, v);
+          );
+        );
+        i += 1;
+      );
+    );
+  );
+);
+
+// ================================================================ holding
+function hold_begin(t) local(sd) (
+  holding = 1;
+  hold_t0 = t;
+  hold_vt0 = vt + (t - bt);
+  hold_fresh = 1;
+  play_now ? 0 : ( (rec_on && take_live) ? 0 : origin = t );
+  sd = locked ? slider7 : 1 + floor(fmodp(time_precise() * 7919.37 + rand(1000), 1) * 99999);
+  // fmodp of a fraction: the time's fractional part spread over 1..99999
+  cur_seed = clampv(floor(sd), 1, 99999);
+  new_variation(cur_seed);
+  holds_n += 1;
+  // The take: a new one for each hold, unless Record is gathering them. A
+  // take made with Record waits for Drag Out, Insert or Clear: a hold
+  // afterwards plays but is not kept, so it can never be lost by touching a key.
+  (!take_live && !(take_kind == 2 && take_ready && !rec_on)) ? (
+    rec_n = 0; rec_notes = 0; take_live = 1; take_ready = 0; take_kind = rec_on ? 2 : 1;
+    rt = -(t - bt); rt_blk = rt;
+    take_qn0 = play_now ? t : -1;
+    take_tempo = tempo; take_num = ts_num > 0 ? ts_num : 4; take_den = ts_denom > 0 ? ts_denom : 4;
+    take_jumped = 0;
+    take_id += 1;
+  );
+  e_now = energy_at(0);
+  dyn_last = -1;
+  send_dyn(t);
+  layers_update(t);
+);
+
+function hold_end(t) local(i) (
+  holding = 0;
+  all_off(t);
+  i = 0; loop(NL, L_act[i] = 0; i += 1; );
+  pad_n = 0;
+  // without Record, a take is one hold
+  // the take ends once this block's last messages - these note-offs - are in it
+  (take_live && !rec_on) ? ( take_len = rt_blk + (t - bt); take_end_req = 1; );
+);
+
+// A chord is gathered for a moment before it counts, so a chord played a
+// little spread is one change, not three (and a rolled first chord is one
+// hold start).
+function chord_settle(t) (
+  chord_due = -1;
+  chord_rebuild();
+  ch_n > 0 ? (
+    !holding ? hold_begin(t) : (
+      // a new chord while holding: the bass and the pad follow at once
+      L_act[1] && L_steps[1] > 0 ? ( pad_voicing(); pad_sound(t); );
+      L_act[0] && ch_root != bass_root ? ( L_next[0] = t; );
+    );
+    bass_root = ch_root;
+  ) : (
+    holding ? hold_end(t);
+  );
+);
+
+// ================================================================ the take
+function rec_add(off, s, d1, d2) local(p) (
+  (take_live && rec_n < REC_MAX) ? (
+    p = rec_base + rec_n * 4;
+    // (a key let through just before its hold began is moved to the start)
+    p[0] = max(0, rt_blk + off * bps); p[1] = s; p[2] = d1; p[3] = d2;
+    rec_n += 1;
+    ((s & 0xF0) == 0x90 && d2 > 0) ? rec_notes += 1;
+  );
+);
+
+// ================================================================ input
+function key_event(t, m1, m2, m3) local(st, chn, wasdn, i) (
+  st = m1 & 0xF0; chn = m1 & 0x0F;
+  (in_chan == 0 || chn == in_chan - 1) ? (
+    (st == 0x90 && m3 > 0) ? (
+      down_base[m2] = 1; held_base[m2] = 1; hvel_base[m2] = m3;
+      // your own key, let through, is a note like any other (layer 5), so a
+      // generated note on the same pitch strikes it again but never ends it
+      keys_thru ? ( L_ch[5] = chn; L_lvl[5] = 1; note_on(t, 5, m2, m3, -1); );
+      chord_due < 0 ? chord_due = t + settle_beats;
+      1;
+    ) : (st == 0x80 || (st == 0x90 && m3 == 0)) ? (
+      wasdn = down_base[m2];
+      down_base[m2] = 0;
+      (pedal_on && pedal_down) ? 0 : ( held_base[m2] = 0; chord_due < 0 ? chord_due = t + settle_beats; );
+      (keys_thru && wasdn) ? ( L_ch[5] = chn; note_off_pitch(t, 5, m2); );
+      1;
+    ) : (st == 0xB0 && m2 == 64 && pedal_on) ? (
+      pedal_down = m3 >= 64;
+      !pedal_down ? (
+        i = 0;
+        loop(128, (held_base[i] && !down_base[i]) ? ( held_base[i] = 0; chord_due < 0 ? chord_due = t + settle_beats; ); i += 1; );
+      );
+      1;
+    ) : (st == 0xB0 && (m2 == 120 || m2 == 123)) ? (
+      memset(held_base, 0, 128); memset(down_base, 0, 128); pedal_down = 0;
+      chord_due = t;
+      q_add(t, m1, m2, m3);
+      1;
+    ) : 0;
+  ) : 0;
+);
+
+// Runs the music forward to beat tb, one event at a time in order: notes
+// ending, notes due, chords settling, layers stepping.
+function run_to(tb) local(go, tmin, kind, idx, i) (
+  go = 1;
+  while (go) (
+    tmin = tb; kind = 0;
+    i = 0;
+    loop(an_hi, (an_base[i * AN_W] && an_base[i * AN_W + 3] < tmin) ? ( tmin = an_base[i * AN_W + 3]; kind = 1; idx = i; ); i += 1; );
+    (chord_due >= 0 && chord_due < tmin) ? ( tmin = chord_due; kind = 4; );
+    i = 0;
+    loop(pn_n, pend_base[i * 6] < tmin ? ( tmin = pend_base[i * 6]; kind = 2; idx = i; ); i += 1; );
+    holding ? (
+      i = 0;
+      loop(NL, (L_act[i] && L_next[i] < tmin) ? ( tmin = L_next[i]; kind = 3; idx = i; ); i += 1; );
+    );
+    kind == 0 ? go = 0 :
+    kind == 1 ? an_end(idx, tmin) :
+    kind == 2 ? pend_fire(idx) :
+    kind == 4 ? chord_settle(tmin) :
+    // (the next grid line at least 0.01 beat on, so a step is never repeated)
+    ( step(idx, tmin); L_next[idx] = next_grid(tmin + 0.01, grid_of(idx)); );
+  );
+);
+
+// Everything a hold has started is stopped: Panic.
+function panic() local(i) (
+  all_off(bt);
+  memset(held_base, 0, 128); memset(down_base, 0, 128);
+  pedal_down = 0; chord_due = -1; holding = 0; ch_n = 0; ch_m = 0;
+  i = 0; loop(NL, L_act[i] = 0; i += 1; );
+  (take_live && !rec_on) ? ( take_len = rt_blk + (bt_end - bt); take_end_req = 1; );
+);
+
+// Record, clicked in the window, acted on here in the audio thread.
+function record_toggle() (
+  rec_on ? (
+    rec_on = 0;
+    (take_live && !holding) ? ( take_len = rt_blk; take_end_req = 1; );
+  ) : (
+    rec_on = 1;
+    !holding ? ( take_live = 0; rec_n = 0; rec_notes = 0; take_ready = 0; take_kind = 2; );
+  );
+);
+
+// ================================================================ first init
+// @init runs again when the transport starts. @serialize being non-empty
+// keeps memory through that, and so does this guard: what is sounding goes
+// on sounding, in time with REAPER, instead of being cut off (stuck) by a
+// reset.
+init_done ? 0 : (
+  inst_id = 1 + floor(rand(999999));
+  cur_seed = 1;
+  chord_due = -1;
+  init_done = 1;
+  ui_zoom = 1;
+);
+apply_sliders();
+gmem[G_MAGIC] = ME_MAGIC;
+
+@slider
+
+apply_sliders();
+
+@block
+
+bps = tempo / 60 / srate;               // beats per sample
+blk_beats = samplesblock * bps;
+settle_beats = 0.025 * tempo / 60;      // 25 ms
+play_now = (play_state == 1 || play_state == 5);
+
+// Following REAPER: a start, a jump or a loop going round moves our beat
+// to REAPER's. Notes sounding keep their remaining lengths; layers find
+// their places on REAPER's grid.
+play_now ? (
+  (!was_playing || abs(beat_position - bt) > 0.02) ? (
+    jump = beat_position - bt;
+    i = 0;
+    loop(an_hi, (an_base[i * AN_W] && an_base[i * AN_W + 3] < 100000000000) ? an_base[i * AN_W + 3] += jump; i += 1; );
+    i = 0; loop(pn_n, pend_base[i * 6] += jump; i += 1; );
+    chord_due >= 0 ? chord_due += jump;
+    bt = beat_position;
+    origin = 0;
+    i = 0; loop(NL, L_act[i] ? L_next[i] = next_grid(bt, grid_of(i)); i += 1; );
+    (take_live && was_playing) ? take_jumped = 1;
+  );
+);
+was_playing = play_now;
+bt_end = bt + blk_beats;
+oq_n = 0;
+rt_blk = rt;
+
+// What the window asked for since the last block.
+panic_req ? ( panic_req = 0; panic(); );
+rec_req ? ( rec_req = 0; record_toggle(); );
+
+holding ? (
+  e_now = energy_at((vt - hold_vt0) / (pace * bar_beats()));
+  layers_update(bt);
+  send_dyn(bt);
+);
+
+nev = 0;
+while (midirecv(mo, m1, m2, m3)) (
+  nev < EV_MAX ? (
+    ev_base[nev * 4] = mo; ev_base[nev * 4 + 1] = m1; ev_base[nev * 4 + 2] = m2; ev_base[nev * 4 + 3] = m3;
+    nev += 1;
+  ) : midisend(mo, m1, m2, m3);
+);
+ei = 0;
+while (ei < nev) (
+  mo = ev_base[ei * 4]; m1 = ev_base[ei * 4 + 1]; m2 = ev_base[ei * 4 + 2]; m3 = ev_base[ei * 4 + 3];
+  t_ev = bt + mo * bps;
+  run_to(t_ev);
+  !key_event(t_ev, m1, m2, m3) ? q_add(t_ev, m1, m2, m3);   // everything else passes through
+  ei += 1;
+);
+run_to(bt_end);
+
+// Sort this block's output by time, note-offs first at a shared moment, then
+// send it and keep it in the take. (Insertion sort: a block holds few.)
+i = 1;
+while (i < oq_n) (
+  memcpy(oq_base + OQ_MAX * 4, oq_base + i * 4, 4);
+  k0 = oq_base[OQ_MAX * 4]; s0 = (oq_base[OQ_MAX * 4 + 1] & 0xF0) == 0x90 && oq_base[OQ_MAX * 4 + 3] > 0;
+  j = i - 1;
+  while (j >= 0 && (oq_base[j * 4] > k0 ||
+        (oq_base[j * 4] == k0 && s0 == 0 && (oq_base[j * 4 + 1] & 0xF0) == 0x90 && oq_base[j * 4 + 3] > 0))) (
+    memcpy(oq_base + (j + 1) * 4, oq_base + j * 4, 4);
+    j -= 1;
+  );
+  memcpy(oq_base + (j + 1) * 4, oq_base + OQ_MAX * 4, 4);
+  i += 1;
+);
+i = 0;
+loop(oq_n,
+  midisend(oq_base[i * 4], oq_base[i * 4 + 1], oq_base[i * 4 + 2], oq_base[i * 4 + 3]);
+  rec_add(oq_base[i * 4], oq_base[i * 4 + 1], oq_base[i * 4 + 2], oq_base[i * 4 + 3]);
+  i += 1;
+);
+
+take_end_req ? ( take_end_req = 0; take_live = 0; take_ready = rec_n > 0; );
+bt = bt_end;
+vt += blk_beats;
+take_live ? rt += blk_beats;
+i = 0; loop(NL, L_meter[i] *= 0.97; i += 1; );
+
+@serialize
+
+// The take and the window's size are kept with the project, so a take
+// survives closing it. @serialize being non-empty also stops @init from
+// zeroing memory every time the transport starts.
+file_var(0, init_done);
+file_var(0, inst_id);
+file_var(0, ui_zoom);
+file_var(0, cur_seed);
+file_var(0, rec_n);
+file_var(0, take_len);
+file_var(0, take_qn0);
+file_var(0, take_tempo);
+file_var(0, take_num);
+file_var(0, take_den);
+file_var(0, take_jumped);
+file_var(0, take_ready);
+file_var(0, take_kind);
+file_var(0, rec_notes);
+rec_n = clampv(rec_n, 0, REC_MAX);
+file_mem(0, rec_base, rec_n * 4);
+(file_avail(0) >= 0) ? (
+  (ui_zoom < 1 || ui_zoom > 2) ? ui_zoom = 1;
+  rec_on = 0; take_live = 0;
+);
+
+@gfx 860 780
+
+// ================================================================ helpers
+function layer_name(L) (
+  L == 0 ? "Bass" : L == 1 ? "Pad" : L == 2 ? "Pulse" : L == 3 ? "Arpeggio" : "Sparkle";
+);
+function layer_role(L) (
+  L == 0 ? "The lowest key, low down" :
+  L == 1 ? "The chord held, its voices drifting" :
+  L == 2 ? "Repeated notes that fill in" :
+  L == 3 ? "A looping figure that grows" :
+           "High notes, now and then";
+);
+function shape_name(s) ( s == 0 ? "Build" : s == 1 ? "Swell" : s == 2 ? "Fade" : "Wander" );
+
+// The pointer is over a rectangle - and not over the message bar, which is
+// drawn last and covers anything scrolled underneath it.
+function inr(x, y, w, h) (
+  mouse_x >= x && mouse_x < x + w && mouse_y >= y && mouse_y < y + h && mouse_y >= hit_top;
+);
+
+// The system's own typeface where there is one (Transient Shuffler's, via AutoCC).
+function pick_font() (
+  gfx_setfont(1, "Segoe UI", 14, 0); gfx_getfont(#got);
+  matchi("Segoe UI*", #got) ? strcpy(#ui_font, "Segoe UI") : (
+    gfx_setfont(1, ".AppleSystemUIFont", 14, 0); gfx_getfont(#got);
+    (matchi("*System*", #got) || matchi("*SF*", #got)) ?
+      strcpy(#ui_font, ".AppleSystemUIFont") : strcpy(#ui_font, "Arial");
+  );
+  font_ready = 1;
+);
+
+// Apple's macOS sizes: 13-point text, nothing smaller, everything times ui_s.
+function fonts() (
+  gfx_setfont(1, #ui_font, 14 * ui_s, 0);     // buttons, the message bar
+  gfx_setfont(2, #ui_font, 13 * ui_s, 0);     // labels, secondary text
+  gfx_setfont(3, #ui_font, 14 * ui_s, 'b');   // values, layer names, headings
+);
+
+function text_fit(str, x, y, w, h) local(tw, th, n, c) (
+  gfx_measurestr(str, tw, th);
+  tw <= w ? (
+    gfx_x = x; gfx_y = y; gfx_drawstr(str, 4, x + w, y + h);
+  ) : (
+    n = strlen(str);
+    while (n > 1 && tw > w) (
+      n -= 1;
+      while (n > 1 && (c = str_getchar(str, n)) >= -128 && c < -64) ( n -= 1; );
+      strcpy_substr(#fit, str, 0, n); strcat(#fit, "…");
+      gfx_measurestr(#fit, tw, th);
+    );
+    gfx_x = x; gfx_y = y; gfx_drawstr(#fit, 4, x + w, y + h);
+  );
+);
+
+// Word-wrapped into lines of width w, lh apart; returns the number of lines.
+// With draw = 0 it only counts.
+function wrap_text(str, x, y, w, lh, draw) local(n, s, i, ok, tw, th, lines) (
+  n = strlen(str); s = 0; lines = 0;
+  while (s < n) (
+    while (s < n && str_getchar(str, s) == 32) ( s += 1; );
+    s < n ? (
+      ok = -1; i = s;
+      while (i <= n) (
+        (i == n || str_getchar(str, i) == 32) ? (
+          strcpy_substr(#wl, str, s, i - s);
+          gfx_measurestr(#wl, tw, th);
+          (tw <= w || ok < 0) ? ( ok = i; tw > w ? ( i = n ); ) : ( i = n );
+        );
+        i += 1;
+      );
+      draw ? ( strcpy_substr(#wl, str, s, ok - s); text_fit(#wl, x, y + lines * lh, w, lh); );
+      lines += 1;
+      s = ok;
+    );
+  );
+  max(1, lines);
+);
+
+// A word on a small plate of the view's own ground, so a note under it can
+// never thin its contrast.
+function plate_text(str, x, y, c) local(tw, th) (
+  gfx_measurestr(str, tw, th);
+  setx(C_ROLL);
+  gfx_rect(x - 3 * ui_s, y - 1 * ui_s, tw + 6 * ui_s, th + 2 * ui_s, 1);
+  setx(c);
+  gfx_x = x; gfx_y = y;
+  gfx_drawstr(str);
+);
+
+// ---------------------------------------------------------------- keyboard
+function focus_add(id, x, y, w, h, kind) local(p) (
+  fl_n < FOCUS_MAX ? (
+    p = focus_base + fl_n * FOCUS_W;
+    p[0] = id; p[1] = x; p[2] = y; p[3] = w; p[4] = h; p[5] = kind;
+    fl_n += 1;
+  );
+);
+function focus_ring(x, y, w, h) (
+  setx(C_RING);
+  gfx_rect(x - 3 * ui_s, y - 3 * ui_s, w + 6 * ui_s, h + 6 * ui_s, 0);
+  gfx_rect(x - 2 * ui_s, y - 2 * ui_s, w + 4 * ui_s, h + 4 * ui_s, 0);
+);
+function focus_mark(id, x, y, w, h, kind) (
+  reg_on ? focus_add(id, x, y, w, h, kind);
+  focus_id == id ? focus_ring(x, y, w, h);
+);
+function key_press(id) (
+  (focus_id == id && (ui_key == 13 || ui_key == 32)) ? ( ui_key = 0; 1; ) : 0;
+);
+function key_step(id) local(d) (
+  d = 0;
+  focus_id == id ? (
+    (ui_key == 'up' || ui_key == 'rght') ? ( d = 1;  ui_key = 0; ) :
+    (ui_key == 'down' || ui_key == 'left') ? ( d = -1; ui_key = 0; );
+  );
+  d;
+);
+// What the control just drawn does, shown at the top while it is pointed at
+// or focused. Each hint starts with the control's own name.
+function hint(str) (
+  (w_hot || (w_id > 0 && focus_id == w_id)) ? ( hint_on = 1; ui_hint = str; );
+);
+function set_status(str) ( strcpy(#status, str); undo_clear_on = 0; );
+
+function bwid(label, minw) local(tw, th) (
+  gfx_setfont(1);
+  gfx_measurestr(label, tw, th);
+  max(minw * ui_s, ceil(tw + 24 * ui_s));
+);
+function flow(w) local(x) (
+  (flow_x > flow_x0 && flow_x + w > gfx_w - pad) ? ( flow_x = flow_x0; flow_y += ch + gap; );
+  x = flow_x;
+  flow_x += w + gap;
+  x;
+);
+function cell(n, cols, cw, y0) (
+  cell_x = pad + (n % cols) * (cw + gap);
+  cell_y = y0 + floor(n / cols) * (fh + gap);
+);
+
+// ---------------------------------------------------------------- controls
+// Light fills on a dark ground, so the ink is C_INK on every button, chosen
+// and unchosen alike; a chosen one also carries an ink bar under its label.
+function btn(id, x, y, w, h, label, active) local(hot, held, c) (
+  hot  = inr(x, y, w, h);
+  w_hot = hot; w_id = id;
+  held = hot && (mouse_cap & 1);
+  active ? (
+    c = held ? shade(C_ACCENT, HELD_F) : (hot ? shade(C_ACCENT, HOVER_F) : C_ACCENT);
+  ) : (
+    c = held ? C_CTRL_D : (hot ? C_CTRL_H : C_CTRL);
+  );
+  setx(c);
+  gfx_rect(x, y, w, h, 1);
+  setx(C_INK);
+  gfx_rect(x, y, w, h, 0);
+  gfx_setfont(1);
+  gfx_x = x; gfx_y = y;
+  gfx_drawstr(label, 1 | 4, x + w, y + h);
+  active ? ( setx(C_INK); gfx_rect(x + 10 * ui_s, y + h - 5 * ui_s, w - 20 * ui_s, 2 * ui_s, 1); );
+  focus_mark(id, x, y, w, h, 1);
+  (hot && click) || key_press(id);
+);
+
+// Greys out, leaves the Tab order and stops responding when there is nothing
+// to do. Its dimmed label is the one text exempt from 7:1.
+function ubtn(id, x, y, w, h, label, avail) local(hot, held) (
+  hot = avail && inr(x, y, w, h);
+  w_hot = inr(x, y, w, h); w_id = avail ? id : 0;
+  held = hot && (mouse_cap & 1);
+  avail ? setx(held ? C_CTRL_D : (hot ? C_CTRL_H : C_CTRL)) : setx(C_ACTIVE);
+  gfx_rect(x, y, w, h, 1);
+  avail ? setx(C_INK) : setx(C_SEP);
+  gfx_rect(x, y, w, h, 0);
+  avail ? setx(C_INK) : setx(C_DIM);
+  gfx_setfont(1);
+  gfx_x = x; gfx_y = y;
+  gfx_drawstr(label, 1 | 4, x + w, y + h);
+  avail ? focus_mark(id, x, y, w, h, 1);
+  avail && ((hot && click) || key_press(id));
+);
+
+// A setting with a few values: click or Return goes on, right-click goes
+// back, the arrows go either way; all wrap.
+function optctl(id, x, y, w, h, label, val, vmx) local(hot, nv, d) (
+  hot = inr(x, y, w, h);
+  w_hot = hot; w_id = id;
+  nv  = val;
+  (hot && click)  ? ( nv = val >= vmx ? 0 : val + 1 );
+  (hot && rclick) ? ( nv = val <= 0 ? vmx : val - 1 );
+  key_press(id)   ? ( nv = val >= vmx ? 0 : val + 1 );
+  d = key_step(id);
+  d > 0 ? ( nv = val >= vmx ? 0 : val + 1 ) : d < 0 ? ( nv = val <= 0 ? vmx : val - 1 );
+  setx(C_SUNK);
+  gfx_rect(x, y, w, h, 1);
+  hot ? setx(C_CTRL) : setx(C_EDGE);
+  gfx_rect(x, y, w, h, 0);
+  setx(C_LABEL2);
+  gfx_setfont(2);
+  gfx_x = x; gfx_y = y + 6 * ui_s;
+  gfx_drawstr(label, 1, x + w, y + 24 * ui_s);
+  focus_mark(id, x, y, w, h, 3);
+  ctl_x = x; ctl_y = y; ctl_w = w; ctl_h = h;
+  fld_val = nv;
+  nv != val;
+);
+function ctl_txt(str, c) (
+  gfx_setfont(3);
+  setx(c);
+  gfx_x = ctl_x; gfx_y = ctl_y + 24 * ui_s;
+  gfx_drawstr(str, 1, ctl_x + ctl_w, ctl_y + ctl_h - 2 * ui_s);
+);
+
+function fmtval(kind, v) (
+  kind == 2 ? sprintf(#g, "%d %%", v) :
+  kind == 5 ? sprintf(#g, v == 1 ? "%d bar" : "%d bars", v) :
+  kind == 6 ? sprintf(#g, "%d", v) :
+  kind == 7 ? ( v > 0 ? sprintf(#g, "+%d", v) : v < 0 ? sprintf(#g, "−%d", -v) : sprintf(#g, "0") ) :
+              sprintf(#g, "%d", v);
+);
+
+// A number: drag up or down (Command for fine steps), or focus it and use the
+// arrows (Shift for fine steps). Off (mode 0) it is dimmed and skipped.
+function field(id, x, y, w, h, label, val, vmn, vmx, kind, mode, stp, fine) local(hot, nv, d, ed) (
+  ed  = mode == 1;
+  hot = inr(x, y, w, h);
+  w_hot = hot; w_id = ed ? id : 0;
+  (ed && hot && click) ? ( drag_id = id; drag_y = mouse_y; drag_v = val; );
+  nv = val;
+  (ed && drag_id == id && (mouse_cap & 1)) ? (
+    d = (drag_y - mouse_y) * (vmx - vmn) / (150 * ui_s);
+    (mouse_cap & 4) ? ( d *= 0.2 );
+    nv = clampv(floor(drag_v + d + 0.5), vmn, vmx);
+  );
+  d = ed ? key_step(id) : 0;
+  d != 0 ? ( nv = clampv(val + d * ((mouse_cap & 8) ? fine : stp), vmn, vmx); );
+  ed ? setx(C_SUNK) : setx(C_ROLL);
+  gfx_rect(x, y, w, h, 1);
+  (ed && drag_id == id) ? setx(C_ACCENT) : (ed && hot) ? setx(C_CTRL) : ed ? setx(C_EDGE) : setx(C_SEP);
+  gfx_rect(x, y, w, h, 0);
+  mode ? setx(C_LABEL2) : setx(C_DIM);
+  gfx_setfont(2);
+  gfx_x = x; gfx_y = y + 6 * ui_s;
+  gfx_drawstr(label, 1, x + w, y + 24 * ui_s);
+  gfx_setfont(3);
+  ed ? setx(C_TEXT) : mode ? setx(C_LABEL2) : setx(C_DIM);
+  fmtval(kind, nv);
+  gfx_x = x; gfx_y = y + 24 * ui_s;
+  gfx_drawstr(#g, 1, x + w, y + h - 2 * ui_s);
+  ed ? focus_mark(id, x, y, w, h, 2);
+  fld_val = nv;
+  nv != val;
+);
+
+// A line as thick as the interface is large.
+function tline(x1, y1, x2, y2) local(j) (
+  j = 0;
+  loop(max(1, floor(ui_s + 0.5)), gfx_line(x1, y1 + j, x2, y2 + j); j += 1; );
+);
+
+// A tick box with a 28-point target; the tick as well as the yellow.
+function tickbox(id, x, y, on) local(hot, eb, ex, ey) (
+  hot = inr(x, y, ch, ch);
+  w_hot = hot; w_id = id;
+  eb = 16 * ui_s; ex = x + (ch - eb) / 2; ey = y + (ch - eb) / 2;
+  on ? setx(C_ACCENT) : hot ? setx(C_CTRL_H) : setx(C_CTRL);
+  gfx_rect(ex, ey, eb, eb, 1);
+  setx(C_INK);
+  gfx_rect(ex, ey, eb, eb, 0);
+  on ? (
+    tline(ex + 4 * ui_s, ey + 8 * ui_s, ex + 7 * ui_s, ey + 11 * ui_s);
+    tline(ex + 7 * ui_s, ey + 11 * ui_s, ex + 12 * ui_s, ey + 5 * ui_s);
+  );
+  focus_mark(id, x, y, ch, ch, 4);
+  (hot && click) || key_press(id);
+);
+
+// Sliders written from the window. Each one names its slider, so REAPER
+// shows the change and records it as a change to the project.
+function set_slider(n, v) (
+  n == 1 ? ( slider1 = v; sliderchange(slider1); ) :
+  n == 2 ? ( slider2 = v; sliderchange(slider2); ) :
+  n == 3 ? ( slider3 = v; sliderchange(slider3); ) :
+  n == 4 ? ( slider4 = v; sliderchange(slider4); ) :
+  n == 5 ? ( slider5 = v; sliderchange(slider5); ) :
+  n == 6 ? ( slider6 = v; sliderchange(slider6); ) :
+  n == 7 ? ( slider7 = v; sliderchange(slider7); ) :
+  n == 8 ? ( slider8 = v; sliderchange(slider8); ) :
+  n == 9 ? ( slider9 = v; sliderchange(slider9); ) :
+  n == 10 ? ( slider10 = v; sliderchange(slider10); ) :
+  n == 11 ? ( slider11 = v; sliderchange(slider11); ) :
+  n == 12 ? ( slider12 = v; sliderchange(slider12); ) :
+  n == 13 ? ( slider13 = v; sliderchange(slider13); ) :
+  n == 14 ? ( slider14 = v; sliderchange(slider14); ) :
+  n == 15 ? ( slider15 = v; sliderchange(slider15); ) :
+  n == 16 ? ( slider16 = v; sliderchange(slider16); ) :
+  n == 17 ? ( slider17 = v; sliderchange(slider17); ) :
+  n == 18 ? ( slider18 = v; sliderchange(slider18); ) :
+  n == 19 ? ( slider19 = v; sliderchange(slider19); ) :
+  n == 20 ? ( slider20 = v; sliderchange(slider20); ) :
+  n == 21 ? ( slider21 = v; sliderchange(slider21); ) :
+  n == 22 ? ( slider22 = v; sliderchange(slider22); ) :
+  n == 23 ? ( slider23 = v; sliderchange(slider23); ) :
+  n == 24 ? ( slider24 = v; sliderchange(slider24); ) :
+  n == 25 ? ( slider25 = v; sliderchange(slider25); ) :
+  n == 26 ? ( slider26 = v; sliderchange(slider26); ) :
+  n == 27 ? ( slider27 = v; sliderchange(slider27); ) :
+  n == 28 ? ( slider28 = v; sliderchange(slider28); ) :
+  n == 29 ? ( slider29 = v; sliderchange(slider29); ) :
+  n == 30 ? ( slider30 = v; sliderchange(slider30); ) :
+  n == 31 ? ( slider31 = v; sliderchange(slider31); ) :
+  n == 32 ? ( slider32 = v; sliderchange(slider32); ) :
+  n == 33 ? ( slider33 = v; sliderchange(slider33); );
+  apply_sliders();
+  undo_pt = 1;
+);
+
+function note_name(p, buf) local(pc) (
+  pc = p % 12;
+  // spelt as ScaleView spells (C#, Eb): Arial, REAPER's fallback, may have no ♯ or ♭
+  strcpy(buf, pc == 0 ? "C" : pc == 1 ? "C#" : pc == 2 ? "D" : pc == 3 ? "Eb" : pc == 4 ? "E" :
+              pc == 5 ? "F" : pc == 6 ? "F#" : pc == 7 ? "G" : pc == 8 ? "Ab" : pc == 9 ? "A" :
+              pc == 10 ? "Bb" : "B");
+);
+
+// The take, handed to the helper script through gmem: the events, then the
+// header, then the request number last, so the helper never reads half a take.
+function send_take(kind) local(i, n, tr) (
+  n = rec_n;
+  i = 0;
+  loop(n,
+    gmem[G_EVENTS + i * 4]     = rec_base[i * 4];
+    gmem[G_EVENTS + i * 4 + 1] = rec_base[i * 4 + 1];
+    gmem[G_EVENTS + i * 4 + 2] = rec_base[i * 4 + 2];
+    gmem[G_EVENTS + i * 4 + 3] = rec_base[i * 4 + 3];
+    i += 1;
+  );
+  tr = get_host_placement();
+  gmem[G_MAGIC] = ME_MAGIC;
+  gmem[G_KIND] = kind;
+  gmem[G_TRACK] = tr;
+  gmem[G_QN0] = (place_mode == 0 && !take_jumped) ? take_qn0 : -1;
+  gmem[G_COUNT] = n;
+  gmem[G_TEMPO] = take_tempo > 0 ? take_tempo : 120;
+  gmem[G_NUM] = take_num > 0 ? take_num : 4;
+  gmem[G_DEN] = take_den > 0 ? take_den : 4;
+  gmem[G_PLACE] = place_mode;
+  gmem[G_LEN] = take_len;
+  gmem[G_INST] = inst_id;
+  req_id = max(gmem[G_REQ], gmem[G_DONE]) + 1;
+  gmem[G_REQ] = req_id;
+  waiting = 1;
+  wait_t0 = time_precise();
+);
+
+// ================================================================ frame setup
+!font_ready ? pick_font();
+(ui_zoom < 1 || ui_zoom > 2) ? ( ui_zoom = 1 );
+// The layout needs LAYOUT_W points across; a narrower window shrinks a large
+// interface to fit (never below 100%) rather than drawing past its edge.
+LAYOUT_W = 400;
+ui_s = max(1, gfx_ext_retina) * max(1, min(ui_zoom, gfx_w / (max(1, gfx_ext_retina) * LAYOUT_W)));
+fonts();
+
+ui_key = gfx_getchar();
+click  = (mouse_cap & 1) && !(last_cap & 1);
+rclick = (mouse_cap & 2) && !(last_cap & 2);
+!(mouse_cap & 1) ? ( drag_id = 0; );
+(click || rclick) ? ( focus_id = 0 );
+
+pad = 12 * ui_s;
+gap = 12 * ui_s;
+ch  = 28 * ui_s;
+fh  = 48 * ui_s;
+
+mouse_wheel != 0 ? ( scroll -= mouse_wheel / 120 * 48 * ui_s; mouse_wheel = 0; );
+scroll = clampv(scroll, 0, max(0, content_h - gfx_h));
+
+// The helper is running while its heartbeat moves.
+now_t = time_precise();
+gmem[G_HEART] != hb_last ? ( hb_last = gmem[G_HEART]; hb_seen = now_t; );
+helper_on = hb_seen > 0 && now_t - hb_seen < 1.5;
+// The helper's answer to our request
+(waiting && gmem[G_DONE] == req_id && gmem[G_DONEINST] == inst_id) ? (
+  waiting = 0;
+  n = clampv(gmem[G_MSGLEN], 0, 600);
+  strcpy(#status, "");
+  i = 0;
+  loop(n, str_setchar(#status, i, gmem[G_MSG + i]); i += 1; );
+  undo_clear_on = 0;
+);
+(waiting && now_t - wait_t0 > 3) ? (
+  waiting = 0;
+  set_status("The helper didn’t answer. In REAPER’s Actions list, run “Midi Evolver Helper”, then try again.");
+);
+
+// the ground behind everything (docs/COLOUR.md)
+setx(C_GROUND);
+gfx_rect(0, 0, gfx_w, gfx_h, 1);
+
+fl_n = 0; reg_on = 1; hint_on = 0;
+
+// The message bar is drawn last, over anything scrolled beneath it, but it
+// comes first in the Tab order, so its buttons are registered now.
+status_on = strlen(#status) > 0;
+opt_w = bwid("Options", 84);
+opt_x = gfx_w - pad - opt_w;
+dis_w = bwid("Dismiss", 84);
+dis_x = opt_x - gap - dis_w;
+und_w = bwid("Undo", 64);
+und_x = dis_x - gap - und_w;
+msg_r = (status_on ? (undo_clear_on ? und_x : dis_x) : opt_x) - gap;
+gfx_setfont(1);
+bar_lh = gfx_texth + 2 * ui_s;
+bar_under = und_x - gap - pad < 240 * ui_s;
+bar_x = pad;
+bar_w = bar_under ? gfx_w - 2 * pad : msg_r - pad;
+bar_y = bar_under ? pad + ch + 6 * ui_s : pad;
+nw = bar_under ? bar_w : und_x - gap - pad;
+bar_n = max(wrap_text("The helper didn’t answer. In REAPER’s Actions list, run “Midi Evolver Helper”, then try again.", 0, 0, nw, bar_lh, 0),
+            max(wrap_text(#status, 0, 0, nw, bar_lh, 0), wrap_text(#bar_last, 0, 0, nw, bar_lh, 0)));
+bar_h = bar_under ? bar_n * bar_lh : max(ch, bar_n * bar_lh);
+top_h = bar_y + bar_h + 8 * ui_s;
+(status_on && undo_clear_on) ? focus_add(114, und_x, pad, und_w, ch, 1);
+status_on ? focus_add(113, dis_x, pad, dis_w, ch, 1);
+focus_add(110, opt_x, pad, opt_w, ch, 1);
+
+hit_top = top_h;
+y = top_h + 4 * ui_s - scroll;
+bb = bar_beats();
+
+// ---------------------------------------------------------------- 1. Motion
+// What is playing now, the last two bars of it, and where the hold is on its
+// energy curve.
+gfx_setfont(3);
+setx(C_TEXT);
+gfx_x = pad; gfx_y = y;
+gfx_drawstr("Motion");
+gfx_setfont(2);
+holding ? (
+  strcpy(#mh, "Holding ");
+  i = 0;
+  loop(min(ch_n, 8), note_name(ch_base[i], #nn); strcat(#mh, #nn); i < min(ch_n, 8) - 1 ? strcat(#mh, " "); i += 1; );
+  na = 0; i = 0; loop(NL, L_act[i] ? na += 1; i += 1; );
+  sprintf(#nn, " — %d of %d layers playing", na, L_on[0] + L_on[1] + L_on[2] + L_on[3] + L_on[4]);
+  strcat(#mh, #nn);
+) : (
+  strcpy(#mh, "Hold some keys to start.");
+);
+gfx_measurestr("Motion", tw, th);
+gfx_setfont(3); gfx_measurestr("Motion", tw, th);
+gfx_setfont(2);
+setx(holding ? C_TEXT : C_LABEL2);
+text_fit(#mh, pad + tw + 12 * ui_s, y, gfx_w - 2 * pad - tw - 12 * ui_s, th);
+y += th + 6 * ui_s;
+
+vx = pad; vw = gfx_w - 2 * pad; vh = 132 * ui_s; vy = y;
+setx(C_ROLL);
+gfx_rect(vx, vy, vw, vh, 1);
+setx(C_SEP);
+gfx_rect(vx, vy, vw, vh, 0);
+// the window: the last two bars, now at the right edge
+win = 2 * bb;
+t1 = vt; t0 = vt - win;
+// beat and bar lines, counted from where the grid starts
+k = ceil((t0 - origin) / 1);
+while (origin + k <= t1) (
+  gx = vx + (origin + k - t0) / win * vw;
+  setx(fmodp(k, bb) == 0 ? C_SEP : C_BEAT);
+  gfx_line(gx, vy + 1, gx, vy + vh - 2);
+  k += 1;
+);
+// the pitch range of what is in view, at least two octaves
+lo = 128; hi = -1; i = 0;
+loop(roll_n,
+  r = roll_base + i * 5;
+  (r[2] < 0 || r[2] > t0) ? ( lo = min(lo, r[0]); hi = max(hi, r[0]); );
+  i += 1;
+);
+hi < lo ? ( lo = 48; hi = 84; );
+(hi - lo < 24) ? ( mid = (hi + lo) / 2; lo = floor(mid - 12); hi = ceil(mid + 12); );
+nh = clampv((vh - 8 * ui_s) / (hi - lo + 1), 3 * ui_s, 10 * ui_s);
+i = 0;
+loop(roll_n,
+  r = roll_base + i * 5;
+  (r[2] < 0 || r[2] > t0) ? (
+    x1 = vx + max(0, (r[1] - t0) / win) * vw;
+    x2 = vx + ((r[2] < 0 ? t1 : min(r[2], t1)) - t0) / win * vw;
+    yy = vy + 4 * ui_s + (hi - r[0]) * (vh - 8 * ui_s - nh) / max(1, hi - lo);
+    (r[2] < 0 && holding) ? setx(C_ACCENT) : setx(C_CTRL);
+    gfx_rect(x1, yy, max(2 * ui_s, x2 - x1 - 1), max(2 * ui_s, nh - 1), 1);
+  );
+  i += 1;
+);
+!holding && roll_n == 0 ? (
+  gfx_setfont(2);
+  gfx_measurestr("Hold some keys and the music they start appears here.", tw, th);
+  plate_text("Hold some keys and the music they start appears here.", vx + (vw - tw) / 2, vy + (vh - th) / 2, C_LABEL2);
+);
+w_hot = inr(vx, vy, vw, vh); w_id = 0;
+hint("Motion: the last two bars of what Midi Evolver played. Notes sounding now are yellow.");
+y += vh + 8 * ui_s;
+
+// The energy strip: the shape over two paces, the layers' entry levels, and
+// where the hold is now.
+eh = 40 * ui_s; ey = y;
+setx(C_ROLL);
+gfx_rect(vx, ey, vw, eh, 1);
+setx(C_SEP);
+gfx_rect(vx, ey, vw, eh, 0);
+i = 0;
+loop(NL,
+  L_on[i] && L_th[i] > 0 ? (
+    setx(C_EDGE);
+    gy = ey + eh - 3 * ui_s - L_th[i] * (eh - 6 * ui_s);
+    gfx_line(vx + 1, gy, vx + 6 * ui_s, gy);
+    gfx_line(vx + vw - 6 * ui_s, gy, vx + vw - 2, gy);
+  );
+  i += 1;
+);
+u_now = holding ? (vt - hold_vt0) / (pace * bb) : 0;
+u_base = shape == 3 ? floor(u_now / 2) * 2 : 0;
+setx(C_LABEL2);
+px = 0; lpx = 0; lpy = 0;
+while (px <= vw - 2 * ui_s) (
+  uu = u_base + px / (vw - 2 * ui_s) * 2;
+  ev = shape_at(uu, holding ? seed_now : 0);
+  py = ey + eh - 3 * ui_s - ev * (eh - 6 * ui_s);
+  px > 0 ? tline(vx + lpx, lpy, vx + 1 + px, py);
+  lpx = 1 + px; lpy = py;
+  px += 2 * ui_s;
+);
+holding ? (
+  ux = vx + 1 + clampv((u_now - u_base) / 2, 0, 1) * (vw - 2 * ui_s);
+  setx(C_PLAY);
+  gfx_line(ux, ey + 2, ux, ey + eh - 3);
+  setx(C_ACCENT);
+  gfx_circle(ux, ey + eh - 3 * ui_s - e_now * (eh - 6 * ui_s), 4 * ui_s, 1, 1);
+);
+gfx_setfont(2);
+plate_text("Energy", vx + 8 * ui_s, ey + 4 * ui_s, C_LABEL2);
+w_hot = inr(vx, ey, vw, eh); w_id = 0;
+hint("Energy: how much is going on over two paces of holding. The marks at the sides are where each layer comes in.");
+y += eh + gap + 4 * ui_s;
+
+// ---------------------------------------------------------------- 2. Evolution
+gfx_setfont(3);
+setx(C_TEXT);
+gfx_x = pad; gfx_y = y;
+gfx_drawstr("Evolution");
+y += gfx_texth + 8 * ui_s;
+
+flow_x0 = pad; flow_x = pad; flow_y = y;
+bw = max(max(bwid("Build", 80), bwid("Swell", 80)), max(bwid("Fade", 80), bwid("Wander", 80)));
+bx = flow(bw); btn(101, bx, flow_y, bw, ch, "Build", shape == 0) ? set_slider(1, 0);
+hint("Build: starts quietly and grows over the pace, then keeps evolving at the top.");
+bx = flow(bw); btn(102, bx, flow_y, bw, ch, "Swell", shape == 1) ? set_slider(1, 1);
+hint("Swell: grows over the pace and falls back over the next, again and again.");
+bx = flow(bw); btn(103, bx, flow_y, bw, ch, "Fade", shape == 2) ? set_slider(1, 2);
+hint("Fade: starts at its fullest and thins out over the pace.");
+bx = flow(bw); btn(104, bx, flow_y, bw, ch, "Wander", shape == 3) ? set_slider(1, 3);
+hint("Wander: rises and falls unpredictably, at a speed set by the pace.");
+pw = bwid("Panic", 80);
+flow_x <= gfx_w - pad - pw ? ( bx = gfx_w - pad - pw; ) : ( bx = flow(pw); );
+btn(105, bx, flow_y, pw, ch, "Panic", 0) ? (
+  panic_req = 1;
+  set_status("Panic — every note Midi Evolver started has been stopped.");
+);
+hint("Panic: stop every note Midi Evolver started, and forget the keys held.");
+y = flow_y + ch + gap;
+
+fcols = clampv(floor((gfx_w - 2 * pad + gap) / (118 * ui_s + gap)), 2, 6);
+fw = floor((gfx_w - 2 * pad - (fcols - 1) * gap) / fcols);
+fy0 = y;
+cell(0, fcols, fw, fy0);
+field(1, cell_x, cell_y, fw, fh, "Pace", slider2, 1, 64, 5, 1, 1, 1) ? set_slider(2, fld_val);
+hint("Pace: how many bars the evolution takes to grow. Fewer bars evolve faster.");
+cell(1, fcols, fw, fy0);
+field(2, cell_x, cell_y, fw, fh, "Change", slider3, 0, 100, 2, 1, 5, 1) ? set_slider(3, fld_val);
+hint("Change: how much the patterns themselves change as they go round. 0% keeps them as they began.");
+cell(2, fcols, fw, fy0);
+field(3, cell_x, cell_y, fw, fh, "Start", slider4, 0, 100, 2, 1, 5, 1) ? (
+  set_slider(4, fld_val); slider5 < slider4 ? set_slider(5, slider4); );
+hint("Start: how much is going on the moment you press the keys.");
+cell(3, fcols, fw, fy0);
+field(4, cell_x, cell_y, fw, fh, "Peak", slider5, 0, 100, 2, 1, 5, 1) ? (
+  set_slider(5, fld_val); slider4 > slider5 ? set_slider(4, slider5); );
+hint("Peak: how far it grows. Below 100% the last layers may never come in.");
+cell(4, fcols, fw, fy0);
+field(5, cell_x, cell_y, fw, fh, "Feel", slider8, 0, 100, 2, 1, 5, 1) ? set_slider(8, fld_val);
+hint("Feel: how far the timing and loudness wander, the way nobody plays a figure twice alike.");
+cell(5, fcols, fw, fy0);
+optctl(6, cell_x, cell_y, fw, fh, "Variation", slider6, 1) ? (
+  fld_val ? (
+    set_slider(7, cur_seed); set_slider(6, 1);
+    sprintf(#status, "Locked to variation %d — every hold now starts the same way. Your playing still steers it.", cur_seed);
+  ) : (
+    set_slider(6, 0);
+    set_status("Every hold is a new variation again.");
+  );
+);
+slider6 ? ( sprintf(#g, "Locked: %d", slider7); ctl_txt(#g, C_TEXT); ) : ctl_txt("New Each Time", C_TEXT);
+hint("Variation: a new one each time you hold, or locked to the last one so you can play it again.");
+y = fy0 + ceil(6 / fcols) * (fh + gap);
+
+// ---------------------------------------------------------------- 3. Layers
+gfx_setfont(3);
+setx(C_TEXT);
+gfx_x = pad; gfx_y = y;
+gfx_drawstr("Layers");
+gfx_setfont(2);
+setx(C_LABEL2);
+gfx_x += 12 * ui_s;
+gfx_measurestr("Layers", tw, th);
+text_fit("They come in from the top down as the energy rises.", pad + tw + 24 * ui_s, y, gfx_w - 2 * pad - tw - 24 * ui_s, th);
+y += th + 8 * ui_s;
+
+// A row: the box and the name, then Channel, Octave and Level; the fields go
+// under the name when the window is too narrow for one line, and the words
+// wrap rather than being cut short.
+fwl = 84 * ui_s;
+gfx_setfont(2);
+lh3 = gfx_texth + 2 * ui_s;
+L = 0;
+loop(NL,
+  !L_on[L] ? strcpy(#ls, "Off") :
+  (L_act[L] && holding) ? sprintf(#ls, "%s — playing", layer_role(L)) :
+  // (at once: the shape starts at or above where it comes in)
+  L_th[L] <= shape_at(0, 0) + 0.0001 ? sprintf(#ls, "%s — comes in at once", layer_role(L)) :
+                 sprintf(#ls, "%s — comes in at %d%%", layer_role(L), floor(L_th[L] * 100 + 0.5));
+  ry = y; rx = pad; rw = gfx_w - 2 * pad;
+  nx = rx + 6 * ui_s + ch + 8 * ui_s;
+  one_line = rw - (nx - rx) - 3 * (fwl + gap) - 12 * ui_s >= 150 * ui_s;
+  nwid = one_line ? rw - (nx - rx) - 3 * (fwl + gap) - 12 * ui_s : rw - (nx - rx) - 16 * ui_s;
+  gfx_setfont(2);
+  nlines = wrap_text(#ls, 0, 0, nwid, lh3, 0);
+  texth_ = 4 * ui_s + 18 * ui_s + nlines * lh3;
+  rowh = one_line ? max(fh + 12 * ui_s, texth_ + 6 * ui_s) : texth_ + 8 * ui_s + fh + 12 * ui_s;
+  setx(L_act[L] && holding ? C_ACTIVE : C_POPUP);
+  gfx_rect(rx, ry, rw, rowh, 1);
+  (L_act[L] && holding) ? ( setx(C_ACCENT); gfx_rect(rx, ry, 3 * ui_s, rowh, 1); );
+  bxh = rx + 6 * ui_s; byh = ry + 4 * ui_s;
+  tickbox(200 + L, bxh, byh, L_on[L]) ? (
+    set_slider(9 + L, L_on[L] ? 0 : 1);
+  );
+  hint("On or off: a layer that’s off never plays. The layers that are on come in from the top down.");
+  // name, then what it does and whether it plays
+  gfx_setfont(3);
+  setx(L_on[L] ? C_TEXT : C_LABEL2);
+  text_fit(layer_name(L), nx, byh + 2 * ui_s, nwid, 16 * ui_s);
+  gfx_setfont(2);
+  setx(L_act[L] && holding ? C_TEXT : C_LABEL2);
+  wrap_text(#ls, nx, byh + 20 * ui_s, nwid, lh3, 1);
+  // the meter: how loud its last note was
+  mx_ = rx + rw - 8 * ui_s; mh_ = rowh - 16 * ui_s;
+  setx(C_ROLL); gfx_rect(mx_, ry + 8 * ui_s, 4 * ui_s, mh_, 1);
+  lv = clampv(L_meter[L], 0, 1);
+  lv > 0.02 ? ( setx(C_ACCENT); gfx_rect(mx_, ry + 8 * ui_s + mh_ * (1 - lv), 4 * ui_s, mh_ * lv, 1); );
+  // the fields
+  fx0 = one_line ? rx + rw - 12 * ui_s - 3 * (fwl + gap) + gap : nx;
+  fyy = one_line ? ry + 6 * ui_s : ry + texth_ + 8 * ui_s;
+  field(210 + L, fx0, fyy, fwl, fh, "Channel", L_ch[L] + 1, 1, 16, 6, L_on[L], 1, 1) ? set_slider(14 + L, fld_val);
+  hint("Channel: the MIDI channel this layer plays on, so each can go to its own instrument.");
+  field(220 + L, fx0 + fwl + gap, fyy, fwl, fh, "Octave", L_oct[L], -2, 2, 7, L_on[L], 1, 1) ? set_slider(19 + L, fld_val);
+  hint("Octave: move this layer up or down by octaves.");
+  field(230 + L, fx0 + 2 * (fwl + gap), fyy, fwl, fh, "Level", floor(L_lvl[L] * 100 + 0.5), 0, 100, 2, L_on[L], 5, 1) ? set_slider(24 + L, fld_val);
+  hint("Level: how loud this layer plays, from silent to full.");
+  y += rowh + 4 * ui_s;
+  L += 1;
+);
+y += gap - 4 * ui_s;
+
+// ---------------------------------------------------------------- 4. Recorder
+gfx_setfont(3);
+setx(C_TEXT);
+gfx_x = pad; gfx_y = y;
+gfx_drawstr("Recorder");
+y += gfx_texth + 8 * ui_s;
+flow_x0 = pad; flow_x = pad; flow_y = y;
+lbl = rec_on ? "Recording" : "Record";
+bw = max(bwid("Record", 96), bwid("Recording", 96)); bx = flow(bw);
+btn(120, bx, flow_y, bw, ch, lbl, rec_on) ? (
+  rec_req = 1;
+  rec_on ? set_status("Stopped recording. Drag Out or Insert puts the take in your project.")
+         : set_status("Recording — every hold from now on goes into one take, with the pauses between. Click Recording to stop.");
+);
+hint("Record: keep every hold in one take until you click again. Without it, the take is your last hold.");
+bw = bwid("Clear", 72); bx = flow(bw);
+ubtn(121, bx, flow_y, bw, ch, "Clear", rec_n > 0 && !take_live) ? (
+  clear_n = rec_n; clear_len = take_len; clear_ready = take_ready;
+  clear_notes = rec_notes; clear_kind = take_kind;
+  rec_n = 0; rec_notes = 0; take_ready = 0; take_kind = 0;
+  set_status("Cleared the take.");
+  undo_clear_on = 1;
+);
+hint("Clear: throw the take away. Undo brings it back.");
+bw = bwid("Drag Out…", 104); bx = flow(bw);
+ubtn(122, bx, flow_y, bw, ch, "Drag Out…", take_ready && !take_live && !waiting) ? (
+  send_take(1);
+  !helper_on ? set_status("Drag Out needs the helper. In REAPER’s Actions list, run “Midi Evolver Helper”, then click Drag Out again.");
+);
+hint("Drag Out: save the take as a MIDI file and show it in REAPER’s Media Explorer, to drag onto any track.");
+bw = bwid("Insert", 80); bx = flow(bw);
+ubtn(123, bx, flow_y, bw, ch, "Insert", take_ready && !take_live && !waiting) ? (
+  send_take(2);
+  !helper_on ? set_status("Insert needs the helper. In REAPER’s Actions list, run “Midi Evolver Helper”, then click Insert again.");
+);
+hint("Insert: put the take on this track as a new MIDI item, where it was played or at the edit cursor.");
+y = flow_y + ch + gap;
+
+gcols = clampv(floor((gfx_w - 2 * pad + gap) / (150 * ui_s + gap)), 1, 4);
+gw = floor((gfx_w - 2 * pad - (gcols - 1) * gap) / gcols);
+cell(0, gcols, gw, y);
+optctl(124, cell_x, cell_y, gw, fh, "Place Take", slider33, 1) ? set_slider(33, fld_val);
+ctl_txt(slider33 ? "At Edit Cursor" : "Where Played", C_TEXT);
+hint("Place Take: where Insert puts it — where it was played (if REAPER was playing then), or at the edit cursor.");
+y += fh + 8 * ui_s;
+
+// what is in the take, and whether the helper is there
+gfx_setfont(2);
+lh2 = gfx_texth + 3 * ui_s;
+take_live ? (
+  sprintf(#ti, "%s %.1f bars so far, %d notes.", take_kind == 2 ? "Recording:" : "Keeping this hold:", max(0, rt) / bb, rec_notes);
+) : (take_ready && take_kind == 2) ? (
+  sprintf(#ti, "The take: %.1f bars, %d notes, recorded. New holds aren’t kept until you clear it or record again.", take_len / bb, rec_notes);
+) : take_ready ? (
+  sprintf(#ti, "The take: your last hold, %.1f bars, %d notes. The next hold replaces it.", take_len / bb, rec_notes);
+) : (
+  strcpy(#ti, rec_on ? "Recording — hold some keys." : "No take yet. Your last hold is kept until the next one.");
+);
+setx(C_TEXT);
+y += wrap_text(#ti, pad, y, gfx_w - 2 * pad, lh2, 1) * lh2;
+setx(C_LABEL2);
+helper_on ? strcpy(#hl, "The helper is running: Drag Out and Insert are ready.")
+          : strcpy(#hl, "Drag Out and Insert need the helper: run “Midi Evolver Helper” from REAPER’s Actions list. It stays running until REAPER closes.");
+y += wrap_text(#hl, pad, y, gfx_w - 2 * pad, lh2, 1) * lh2;
+y += gap;
+
+// ---------------------------------------------------------------- 5. MIDI
+gfx_setfont(3);
+setx(C_TEXT);
+gfx_x = pad; gfx_y = y;
+gfx_drawstr("MIDI");
+y += gfx_texth + 8 * ui_s;
+gcols = clampv(floor((gfx_w - 2 * pad + gap) / (130 * ui_s + gap)), 2, 4);
+gw = floor((gfx_w - 2 * pad - (gcols - 1) * gap) / gcols);
+gy0 = y;
+cell(0, gcols, gw, gy0);
+optctl(130, cell_x, cell_y, gw, fh, "Keys From", slider29, 16) ? set_slider(29, fld_val);
+slider29 > 0 ? ( sprintf(#g, "Channel %d", slider29); ctl_txt(#g, C_TEXT); ) : ctl_txt("Any Channel", C_TEXT);
+hint("Keys From: listen to keys on any channel, or on one. Right-click steps back.");
+cell(1, gcols, gw, gy0);
+optctl(131, cell_x, cell_y, gw, fh, "Held Keys", slider30, 1) ? set_slider(30, fld_val);
+ctl_txt(slider30 ? "Played" : "Muted", C_TEXT);
+hint("Held Keys: Muted lets only Midi Evolver play; Played lets your own keys through too.");
+cell(2, gcols, gw, gy0);
+optctl(132, cell_x, cell_y, gw, fh, "Sustain Pedal", slider31, 1) ? set_slider(31, fld_val);
+ctl_txt(slider31 ? "Holds Keys" : "Ignored", C_TEXT);
+hint("Sustain Pedal: Holds Keys keeps the chord evolving after you let go, until the pedal comes up.");
+cell(3, gcols, gw, gy0);
+optctl(133, cell_x, cell_y, gw, fh, "Dynamics", slider32, 3) ? set_slider(32, fld_val);
+ctl_txt(slider32 == 0 ? "Off" : slider32 == 1 ? "CC1" : slider32 == 2 ? "CC11" : "CC1 and CC11", C_TEXT);
+hint("Dynamics: also send the energy as CC1 or CC11, for sample libraries that swell with the mod wheel.");
+y = gy0 + ceil(4 / gcols) * (fh + gap);
+
+content_h = y - gap + pad + scroll;
+content_h > gfx_h ? (
+  setx(C_SEP);
+  gfx_rect(gfx_w - 5 * ui_s, top_h, 3 * ui_s, gfx_h - top_h, 1);
+  setx(C_EDGE);
+  gfx_rect(gfx_w - 5 * ui_s, top_h + (gfx_h - top_h) * scroll / content_h,
+           3 * ui_s, max(12 * ui_s, (gfx_h - top_h) * gfx_h / content_h), 1);
+);
+
+// ---------------------------------------------------------------- message bar
+// At the top, never the bottom: a message, else what the control under the
+// pointer or the focus does, else what to do. A message stays until Dismiss
+// or until another replaces it.
+hit_top = 0; reg_on = 0;
+setx(C_GROUND);
+gfx_rect(0, 0, gfx_w, top_h, 1);
+setx(C_SEP);
+gfx_line(0, top_h - 1, gfx_w, top_h - 1);
+
+(status_on && undo_clear_on) ? (
+  btn(114, und_x, pad, und_w, ch, "Undo", 0) ? (
+    rec_n = clear_n; take_len = clear_len; take_ready = clear_ready; rec_notes = clear_notes; take_kind = clear_kind;
+    set_status("The take is back.");
+  );
+  hint("Undo: bring back the take you cleared.");
+);
+status_on ? (
+  btn(113, dis_x, pad, dis_w, ch, "Dismiss", 0) ? ( strcpy(#status, ""); undo_clear_on = 0; );
+  hint("Dismiss: clear this message.");
+);
+btn(110, opt_x, pad, opt_w, ch, "Options", 0) ? (
+  gfx_x = opt_x; gfx_y = pad + ch;
+  sprintf(#menu, "%sInterface Size 100%%|%sInterface Size 125%%|%sInterface Size 150%%|%sInterface Size 200%%",
+          ui_zoom == 1 ? "!" : "", ui_zoom == 1.25 ? "!" : "", ui_zoom == 1.5 ? "!" : "", ui_zoom == 2 ? "!" : "");
+  menu_sel = gfx_showmenu(#menu);
+  menu_sel == 1 ? ( ui_zoom = 1 ) : menu_sel == 2 ? ( ui_zoom = 1.25 ) :
+  menu_sel == 3 ? ( ui_zoom = 1.5 ) : menu_sel == 4 ? ( ui_zoom = 2 );
+  menu_sel > 0 ? undo_pt = 1;
+);
+hint("Options: choose the interface size, from 100% to 200% (smaller when the window is too narrow).");
+
+gfx_setfont(1);
+strlen(#status) > 0 ? (
+  setx(C_TEXT); strcpy(#bar_last, #status);
+) : hint_on ? (
+  setx(C_LABEL2); strcpy(#bar_last, ui_hint);
+) : (L_on[0] + L_on[1] + L_on[2] + L_on[3] + L_on[4]) == 0 ? (
+  setx(C_WARN_TEXT); strcpy(#bar_last, "Every layer is off, so holding keys plays nothing. Turn a layer on.");
+) : (
+  setx(C_LABEL2); strcpy(#bar_last, "Hold a chord and let it grow. Press Tab to move by keyboard.");
+);
+bar_n = wrap_text(#bar_last, 0, 0, bar_w, bar_lh, 0);
+wrap_text(#bar_last, bar_x, bar_y + max(0, bar_h - bar_n * bar_lh) / 2, bar_w, bar_lh, 1);
+
+// ---------------------------------------------------------------- keys
+ui_key == 9 ? (
+  fl_n > 0 ? (
+    cur = -1; i = 0;
+    loop(fl_n, focus_base[i * FOCUS_W] == focus_id ? ( cur = i ); i += 1; );
+    (mouse_cap & 8) ? ( cur = cur <= 0 ? fl_n - 1 : cur - 1 )
+                    : ( cur = cur < 0 ? 0 : (cur + 1) % fl_n );
+    focus_id = focus_base[cur * FOCUS_W];
+    (focus_id != 110 && focus_id != 113 && focus_id != 114) ? (
+      fy_ = focus_base[cur * FOCUS_W + 2]; fh_ = focus_base[cur * FOCUS_W + 4];
+      fy_ < top_h + 6 * ui_s ? ( scroll -= top_h + 6 * ui_s - fy_ ) :
+      fy_ + fh_ > gfx_h - 6 * ui_s ? ( scroll += fy_ + fh_ - gfx_h + 6 * ui_s );
+    );
+  );
+) : ui_key == 27 ? ( focus_id = 0 );
+
+// sliderchange(-1) from @gfx asks REAPER for a project undo point; deferred
+// to mouse-up so one gesture is one point.
+(undo_pt && !(mouse_cap & 1)) ? ( sliderchange(-1); undo_pt = 0; );
+
+last_cap = mouse_cap;
