@@ -19,3 +19,4 @@ the standing rules; this holds the decisions behind them.
 | [0006](0006-a-new-variation-each-hold.md) | A new variation each hold, with a number to lock |
 | [0007](0007-the-take.md) | The take: the last hold kept by itself, Record to gather, never lost to a touch |
 | [0008](0008-the-window-follows-apples-guidelines.md) | The window follows Apple's guidelines, as the family's do |
+| [0009](0009-a-note-ended-before-it-sounds-is-not-played.md) | A note ended before it has sounded is not played |
