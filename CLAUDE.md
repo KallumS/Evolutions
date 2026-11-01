@@ -140,7 +140,10 @@ and **keeps the longer end** when the sounding note is longer (the pad's
 held voice under an arpeggio note); a strike of the same pitch at the same
 moment is skipped; and `an_end` never ends a note before its own start plus
 two samples (a note pushed late by Feel used to start after the release
-that ended it, and stuck).
+that ended it, and stuck). Where those two samples fall past the block they
+are clamped back onto the note-on's offset, so a note struck in the last
+sample and ended at once has its note-on taken back instead (`q_unsend`,
+[0009](docs/decisions/0009-a-note-ended-before-it-sounds-is-not-played.md)).
 
 ### The take ([0007](docs/decisions/0007-the-take.md))
 

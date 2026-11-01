@@ -320,6 +320,22 @@ def main_checks(host, jsfx):
     check(not bad and not still, "... and nothing is left hanging from either chord", "; ".join(bad[:3]))
     r.close()
 
+    # The same, on sixty locked variations: a locked number plays the same
+    # notes in any host, so a note left hanging is found every time rather
+    # than one run in six. Struck in a block's last sample and ended at once,
+    # a note used to get its note-off sorted before its note-on (0009).
+    hung = []
+    for var in range(1, 61):
+        for held in (2, 4):
+            r = run(sliders=spread({2: 2, 3: 100, 6: 1, 7: var}))
+            r.hold([60, 64, 67]); r.bars(held); r.release([60, 64, 67])
+            r.hold([57, 60, 64]); r.bars(2); r.release([57, 60, 64]); r.beats(2)
+            bad, still = hygiene(r.ev)
+            r.close()
+            if bad or still:
+                hung.append("variation %d after %d bars: %s" % (var, held, (bad or ["%d still sounding" % len(still)])[0]))
+    check(not hung, "sixty locked variations, chord after chord: no note is left hanging", "; ".join(hung[:3]))
+
     # a rolled chord is one hold, not three
     r = run(sliders=spread())
     r.send("note 60 100", "block 1", "note 64 100", "block 1", "note 67 100")

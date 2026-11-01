@@ -305,6 +305,18 @@ function q_add(t, s, d1, d2) local(p) (
   );
 );
 
+// Takes back a note-on this block has queued: the last one for this pitch
+// on this channel at this offset.
+function q_unsend(o, s, d1) local(i, p, found) (
+  found = -1; i = 0;
+  loop(oq_n, p = oq_base + i * 4; (p[0] == o && p[1] == s && p[2] == d1 && p[3] > 0) ? found = i; i += 1; );
+  found >= 0 ? (
+    oq_n -= 1;
+    found < oq_n ? memcpy(oq_base + found * 4, oq_base + oq_n * 4, 4);
+  );
+  found >= 0;
+);
+
 function roll_add(p, t, L, v) local(r) (
   r = roll_base + roll_w * 5;
   r[0] = p; r[1] = vt + (t - bt); r[2] = -1; r[3] = L; r[4] = v;
@@ -321,7 +333,13 @@ function an_end(i, t) local(a, ch, p, r) (
     // sort cannot put the note-off first).
     t = max(t, a[6] + 2 * bps);
     ch = a[1]; p = a[2];
-    q_add(t, 0x80 | ch, p, 0);
+    // Struck in this block's last sample and ended at once, the two samples
+    // above are clamped back onto the note-on's own offset, and the sort puts
+    // a note-off first there - so the note would sound until the next chord.
+    // A note ended before it has sounded is not played: its note-on is taken
+    // back instead (decision 0009).
+    !(a[6] >= bt && to_off(t) <= to_off(a[6]) && q_unsend(to_off(a[6]), 0x90 | ch, p)) ?
+      q_add(t, 0x80 | ch, p, 0);
     snd_base[ch * 128 + p] = 0;
     r = roll_base + a[5] * 5;
     (r[0] == p && r[2] < 0) ? r[2] = vt + (t - bt);
